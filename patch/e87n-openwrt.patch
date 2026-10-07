@@ -1,15 +1,14 @@
 diff --git a/configs/e87n.config b/configs/e87n.config
 new file mode 100644
-index 0000000000..bba36d63f2
+index 0000000000..75880b8e63
 --- /dev/null
 +++ b/configs/e87n.config
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,48 @@
 +# EdgePi E87N build seed for official immortalwrt (master, kernel 6.18).
 +#
-+# This file only selects the target and image formats. Everything else --
-+# kernel modules, firmware, userspace -- comes from the Device/edgepi_e87n
-+# block in target/linux/mediatek/image/filogic.mk, so that "make defconfig"
-+# stays reproducible from a two-line seed.
++# Target and hardware packages come from the Device/edgepi_e87n block in
++# target/linux/mediatek/image/filogic.mk. This file adds only the userspace
++# choices that block does not cover: LuCI interface, Chinese language, theme.
 +#
 +# Usage:
 +#   cp configs/e87n.config .config
@@ -21,19 +20,51 @@ index 0000000000..bba36d63f2
 +
 +CONFIG_TARGET_ROOTFS_INITRAMFS=y
 +CONFIG_TARGET_ROOTFS_SQUASHFS=y
++
++# ---- 中文界面 ----
++# 这个符号是 default-settings-chn 的硬依赖，同时 LuCI 各语言包
++# (luci-i18n-*-zh-cn) 的 DEFAULT 都挂在它上面，开了它才自动带上。
++CONFIG_LUCI_LANG_zh_Hans=y
++
++# ---- 界面与语言 ----
++CONFIG_PACKAGE_luci=y
++CONFIG_PACKAGE_luci-ssl-openssl=y
++CONFIG_PACKAGE_default-settings-chn=y
++CONFIG_PACKAGE_luci-theme-material=y
++
++# ---- LuCI 应用 ----
++CONFIG_PACKAGE_luci-app-firewall=y
++CONFIG_PACKAGE_luci-app-package-manager=y
++CONFIG_PACKAGE_luci-app-advanced-reboot=y
++CONFIG_PACKAGE_luci-app-autoreboot=y
++CONFIG_PACKAGE_luci-app-cloudflared=y
++CONFIG_PACKAGE_luci-app-ddns-go=y
++CONFIG_PACKAGE_luci-app-filemanager=y
++CONFIG_PACKAGE_luci-app-ttyd=y
++CONFIG_PACKAGE_luci-app-uhttpd=y
++CONFIG_PACKAGE_luci-app-wol=y
++
++# ---- 网络唤醒工具 ----
++# luci-app-wol 只依赖 etherwake，但它的控制器同时探测 /usr/bin/wakeonlan，
++# 缺了会一直提示「安装备选的网络唤醒工具」。注意 wakeonlan 不支持
++# interface / broadcast / password 三个参数，那些只有 etherwake 支持。
++CONFIG_PACKAGE_wakeonlan=y
++
++# ---- 系统工具 ----
++CONFIG_PACKAGE_btop=y
 diff --git a/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts b/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts
 new file mode 100644
-index 0000000000..484d5b78ec
+index 0000000000..aa335c51d4
 --- /dev/null
 +++ b/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,291 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * EdgePi E87N (MT7987A), eMMC boot.
 + *
 + * Ported to official immortalwrt master (Linux 6.18).
 + * Baseline: the official mt7987a-hiveton-h5000m.dts, which shares this board's
-+ * gpio layout (reset pio1, wps pio0, LED pio3/pio4, fan on pwm1) and eMMC boot
++ * gpio layout (reset pio1, LED pio3/pio4, fan on pwm1) and eMMC boot
 + * scheme. Board-specific values taken from the EN87 vendor tree.
 + *
 + * The E87N has no wireless hardware. Both PCIe controllers carry one M.2 NVMe
@@ -87,26 +118,30 @@ index 0000000000..484d5b78ec
 +			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
 +			debounce-interval = <10>;
 +		};
-+
-+		button-wps {
-+			label = "wps";
-+			linux,code = <KEY_WPS_BUTTON>;
-+			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
-+			debounce-interval = <10>;
-+		};
 +	};
 +
 +	leds {
 +		compatible = "gpio-leds";
 +
++		/*
++		 * Green, pio 4. Carries the led-boot/led-running/led-failsafe/
++		 * led-upgrade aliases below.
++		 *
++		 * The board has a third LED that lights as soon as power is
++		 * applied and is not described by any of the DTS sources this port
++		 * was derived from (vendor u-boot, EN87, istoreos all define only
++		 * pio 3 and pio 4). It acts as the hardware power indicator, so no
++		 * software LED_FUNCTION_POWER is defined here.
++		 */
 +		led_sys: led-sys {
-+			function = LED_FUNCTION_POWER;
++			function = LED_FUNCTION_STATUS;
 +			color = <LED_COLOR_ID_GREEN>;
 +			gpios = <&pio 4 GPIO_ACTIVE_LOW>;
 +		};
 +
-+		led-status {
-+			function = LED_FUNCTION_STATUS;
++		/* Amber, pio 3. Assigned the WAN role. */
++		led-wan {
++			function = LED_FUNCTION_WAN;
 +			color = <LED_COLOR_ID_AMBER>;
 +			gpios = <&pio 3 GPIO_ACTIVE_LOW>;
 +		};
@@ -314,6 +349,20 @@ index 0000000000..484d5b78ec
 + *		};
 + *	};
 + */
+diff --git a/target/linux/mediatek/filogic/base-files/etc/board.d/01_leds b/target/linux/mediatek/filogic/base-files/etc/board.d/01_leds
+index de8858241c..bfb711eb50 100644
+--- a/target/linux/mediatek/filogic/base-files/etc/board.d/01_leds
++++ b/target/linux/mediatek/filogic/base-files/etc/board.d/01_leds
+@@ -148,6 +148,9 @@ glinet,gl-xe3000)
+ 	ucidef_set_led_netdev "wlan2g" "WLAN2G" "green:wifi2g" "phy0-ap0"
+ 	ucidef_set_led_netdev "wlan5g" "WLAN5G" "green:wifi5g" "phy1-ap0"
+ 	;;
++edgepi,e87n)
++	ucidef_set_led_netdev "wan" "WAN" "amber:wan" "eth1" "link tx rx"
++	;;
+ hiveton,h5000m)
+ 	ucidef_set_led_netdev "wlan2g" "wlan-2ghz" "amber:wlan-2ghz" "phy0.0-ap0" "link tx rx"
+ 	ucidef_set_led_netdev "wlan5g" "wlan-5ghz" "blue:wlan-5ghz" "phy0.1-ap0" "link tx rx"
 diff --git a/target/linux/mediatek/filogic/base-files/etc/board.d/02_network b/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
 index d8ad6f53ac..af04d22792 100644
 --- a/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
@@ -338,30 +387,37 @@ index d8ad6f53ac..af04d22792 100644
  	hiveton,h5000m)
  		lan_mac=$(macaddr_generate_from_mmc_cid mmcblk0)
  		wan_mac=$(macaddr_add "$lan_mac" 1)
-diff --git a/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-hw-offload b/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-hw-offload
+diff --git a/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-theme b/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-theme
 new file mode 100644
-index 0000000000..0bd3302934
+index 0000000000..622c764ff3
 --- /dev/null
-+++ b/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-hw-offload
-@@ -0,0 +1,22 @@
++++ b/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-theme
+@@ -0,0 +1,29 @@
 +#!/bin/sh
-+# EdgePi E87N: enable hardware flow offloading.
++# EdgePi E87N: default LuCI theme.
 +#
-+# The official firewall default only sets flow_offloading (software). The
-+# MT7987 ethernet driver declares .offload_version = 2 / .ppe_num = 2, so the
-+# PPE can offload NAT flows in hardware -- but firewall4 only programs the
-+# flowtable when flow_offloading_hw is set too.
++# luci-base ships /etc/config/luci with mediaurlbase already set to
++# '/luci-static/bootstrap', and every theme's 30_luci-theme-* script only
++# writes that option when it is unset:
 +#
-+# Guarded by board name: this file lives in the shared filogic base-files, so
-+# without the case it would touch every MT798x board.
++#     set_opt() {
++#         if ! uci -q get "luci.$key" 2>/dev/null; then
++#             uci set "luci.$key=$val"
++#
++# So installing luci-theme-material is not enough -- the option is pre-set,
++# every theme script skips it, and the UI keeps using bootstrap.
++#
++# This file sorts after the 30_* scripts, so it runs later and sets the
++# theme unconditionally.
++#
++# Guarded by board name: this lives in the shared filogic base-files.
 +
 +. /lib/functions.sh
 +
 +case "$(board_name)" in
 +edgepi,e87n)
-+	uci -q set firewall.@defaults[0].flow_offloading='1'
-+	uci -q set firewall.@defaults[0].flow_offloading_hw='1'
-+	uci -q commit firewall
++	uci -q set luci.main.mediaurlbase='/luci-static/material'
++	uci -q commit luci
 +	;;
 +esac
 +

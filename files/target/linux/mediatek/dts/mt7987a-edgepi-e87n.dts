@@ -4,7 +4,7 @@
  *
  * Ported to official immortalwrt master (Linux 6.18).
  * Baseline: the official mt7987a-hiveton-h5000m.dts, which shares this board's
- * gpio layout (reset pio1, wps pio0, LED pio3/pio4, fan on pwm1) and eMMC boot
+ * gpio layout (reset pio1, LED pio3/pio4, fan on pwm1) and eMMC boot
  * scheme. Board-specific values taken from the EN87 vendor tree.
  *
  * The E87N has no wireless hardware. Both PCIe controllers carry one M.2 NVMe
@@ -58,26 +58,30 @@
 			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
 			debounce-interval = <10>;
 		};
-
-		button-wps {
-			label = "wps";
-			linux,code = <KEY_WPS_BUTTON>;
-			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
-			debounce-interval = <10>;
-		};
 	};
 
 	leds {
 		compatible = "gpio-leds";
 
+		/*
+		 * Green, pio 4. Carries the led-boot/led-running/led-failsafe/
+		 * led-upgrade aliases below.
+		 *
+		 * The board has a third LED that lights as soon as power is
+		 * applied and is not described by any of the DTS sources this port
+		 * was derived from (vendor u-boot, EN87, istoreos all define only
+		 * pio 3 and pio 4). It acts as the hardware power indicator, so no
+		 * software LED_FUNCTION_POWER is defined here.
+		 */
 		led_sys: led-sys {
-			function = LED_FUNCTION_POWER;
+			function = LED_FUNCTION_STATUS;
 			color = <LED_COLOR_ID_GREEN>;
 			gpios = <&pio 4 GPIO_ACTIVE_LOW>;
 		};
 
-		led-status {
-			function = LED_FUNCTION_STATUS;
+		/* Amber, pio 3. Assigned the WAN role. */
+		led-wan {
+			function = LED_FUNCTION_WAN;
 			color = <LED_COLOR_ID_AMBER>;
 			gpios = <&pio 3 GPIO_ACTIVE_LOW>;
 		};

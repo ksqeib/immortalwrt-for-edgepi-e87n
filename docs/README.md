@@ -6,6 +6,7 @@
 | `补丁说明.md` | 逐个文件的改动说明、构建机的坑（LLVM OOM、镜像源、下载分离） |
 | `diag-on-device.sh` | 设备端诊断脚本，只用 `/sys` 与 `/proc`，不依赖 ethtool/lsblk/lspci |
 | `fix-tree.sh` | 补丁内容变过之后，把源码树复位再重新打补丁 |
+| `luci-app-Airpifanctrl-核查.md` | 第三方风扇插件的核查结论：它把 h5000m 与 E87N 当同一设备，两处对 E87N 不适用 |
 
 ## 快速上手
 
@@ -25,4 +26,39 @@ make -j"$(nproc)" V=s
 ```sh
 scp docs/diag-on-device.sh root@<路由器IP>:/tmp/
 ssh root@<路由器IP> "sh /tmp/diag-on-device.sh"
+```
+
+## 构建 config 说明
+
+`configs/e87n.config` 分两部分：
+
+**目标与硬件**（`CONFIG_TARGET_*`）—— 只选 target 和镜像格式，硬件包全部来自
+`filogic.mk` 里的 `Device/edgepi_e87n` 块，保证 `make defconfig` 可复现。
+
+**用户空间定制**（`CONFIG_PACKAGE_*`）—— 界面与语言：
+
+| 项 | 真名 | 说明 |
+| --- | --- | --- |
+| 中文语言开关 | `CONFIG_LUCI_LANG_zh_Hans` | `default-settings-chn` 的硬依赖；各 `luci-i18n-*-zh-cn` 的 DEFAULT 也挂在它上面，开了它才自动带上 |
+| 中文默认设置 | `luci-app` → `default-settings-chn` | immortalwrt 特有，来自 `package/emortal/default-settings` |
+| 主题 | `luci-theme-material` | |
+| 应用 | 见下 | 全部来自 luci feed |
+
+启用的应用：`luci-app-firewall`、`luci-app-package-manager`、`luci-app-advanced-reboot`、
+`luci-app-autoreboot`、`luci-app-cloudflared`、`luci-app-ddns-go`、`luci-app-filemanager`、
+`luci-app-ttyd`、`luci-app-uhttpd`、`luci-app-wol`，外加 `btop`。
+
+### 两个易错点
+
+1. **`luci-app-ddnsgo` 不存在**，真名是 `luci-app-ddns-go`（`feeds/luci/applications/luci-app-ddns-go`）。
+2. **`luci-i18n-*` 不是目录**，由 `feeds/luci/luci.mk` 的 `LuciTranslation` 宏按
+   `po/<lang>/` 自动生成子包，所以 `find` 找目录会误判为"不存在"。
+
+`make defconfig` 对不存在的 `CONFIG_PACKAGE_xxx` 是**静默丢弃**，不报错。改完 config
+务必回查：
+
+```sh
+for s in CONFIG_PACKAGE_luci-app-wol CONFIG_LUCI_LANG_zh_Hans; do
+  grep -q "^$s=y" .config && echo "OK   $s" || echo "丢弃 $s"
+done
 ```

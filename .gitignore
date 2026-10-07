@@ -2,4 +2,4 @@ immortalwrt/
 *.log
 *.dtb
 /tmp/
-.idea
+.idea/

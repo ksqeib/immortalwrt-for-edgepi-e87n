@@ -18,13 +18,16 @@ fi
 
 echo "==> 应用补丁"
 git apply "$ROOT/patch/e87n-openwrt.patch"
-echo "    ✓ 6 个文件已改（新增 configs/e87n.config、DTS、99-e87n-hw-offload；改 filogic.mk / 02_network / platform.sh）"
+echo "    OK  7 个文件已改（新增 configs/e87n.config、DTS、99-e87n-theme；改 filogic.mk / 01_leds / 02_network / platform.sh）"
 
 echo "==> 校验关键文件"
 for f in configs/e87n.config \
-         target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts \
-         target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-hw-offload; do
-	[ -f "$f" ] && echo "    ✓ $f" || echo "    ✗ 缺 $f"
+         target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts; do
+	if [ -f "$f" ]; then
+		echo "    OK  $f"
+	else
+		echo "    缺  $f"
+	fi
 done
 
 echo "==> 完成。接着执行："
