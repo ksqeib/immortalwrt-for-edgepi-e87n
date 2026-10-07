@@ -1,0 +1,431 @@
+diff --git a/configs/e87n.config b/configs/e87n.config
+new file mode 100644
+index 0000000000..bba36d63f2
+--- /dev/null
++++ b/configs/e87n.config
+@@ -0,0 +1,17 @@
++# EdgePi E87N build seed for official immortalwrt (master, kernel 6.18).
++#
++# This file only selects the target and image formats. Everything else --
++# kernel modules, firmware, userspace -- comes from the Device/edgepi_e87n
++# block in target/linux/mediatek/image/filogic.mk, so that "make defconfig"
++# stays reproducible from a two-line seed.
++#
++# Usage:
++#   cp configs/e87n.config .config
++#   make defconfig
++
++CONFIG_TARGET_mediatek=y
++CONFIG_TARGET_mediatek_filogic=y
++CONFIG_TARGET_mediatek_filogic_DEVICE_edgepi_e87n=y
++
++CONFIG_TARGET_ROOTFS_INITRAMFS=y
++CONFIG_TARGET_ROOTFS_SQUASHFS=y
+diff --git a/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts b/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts
+new file mode 100644
+index 0000000000..484d5b78ec
+--- /dev/null
++++ b/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts
+@@ -0,0 +1,287 @@
++// SPDX-License-Identifier: (GPL-2.0 OR MIT)
++/*
++ * EdgePi E87N (MT7987A), eMMC boot.
++ *
++ * Ported to official immortalwrt master (Linux 6.18).
++ * Baseline: the official mt7987a-hiveton-h5000m.dts, which shares this board's
++ * gpio layout (reset pio1, wps pio0, LED pio3/pio4, fan on pwm1) and eMMC boot
++ * scheme. Board-specific values taken from the EN87 vendor tree.
++ *
++ * The E87N has no wireless hardware. Both PCIe controllers carry one M.2 NVMe
++ * 2230 slot each, so pcie0 and pcie1 are both enabled; no wireless package is
++ * selected.
++ *
++ * Board-level nodes are enabled here (uart0, pwm, ssusb, pcie) because official
++ * mt7987a.dtsi only turns on boottrap/infra_bus_prot/lvts/trng/watchdog,
++ * unlike the EN87 tree which enables them at chip level.
++ */
++
++/dts-v1/;
++#include "mt7987a.dtsi"
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/leds/common.h>
++
++/ {
++	model = "EdgePi E87N";
++	compatible = "edgepi,e87n", "mediatek,mt7987a", "mediatek,mt7987";
++
++	/*
++	 * 1 GiB DDR4. mt7987a.dtsi carries a "memory" node without a device_type
++	 * property, which the kernel's memory scan ignores, so this node is what
++	 * actually takes effect. Same pattern as every official mt7987 board
++	 * with 1 GiB (glinet-gl-be10000, routerich-be7200, smartrg-mt-rainier).
++	 */
++	memory@40000000 {
++		device_type = "memory";
++		reg = <0 0x40000000 0 0x40000000>;
++	};
++
++	aliases {
++		led-boot = &led_sys;
++		led-failsafe = &led_sys;
++		led-running = &led_sys;
++		led-upgrade = &led_sys;
++		serial0 = &uart0;
++	};
++
++	chosen {
++		bootargs = "console=ttyS0,115200n1 root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs";
++		stdout-path = "serial0:115200n8";
++	};
++
++	gpio-keys {
++		compatible = "gpio-keys";
++
++		button-reset {
++			label = "reset";
++			linux,code = <KEY_RESTART>;
++			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
++			debounce-interval = <10>;
++		};
++
++		button-wps {
++			label = "wps";
++			linux,code = <KEY_WPS_BUTTON>;
++			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
++			debounce-interval = <10>;
++		};
++	};
++
++	leds {
++		compatible = "gpio-leds";
++
++		led_sys: led-sys {
++			function = LED_FUNCTION_POWER;
++			color = <LED_COLOR_ID_GREEN>;
++			gpios = <&pio 4 GPIO_ACTIVE_LOW>;
++		};
++
++		led-status {
++			function = LED_FUNCTION_STATUS;
++			color = <LED_COLOR_ID_AMBER>;
++			gpios = <&pio 3 GPIO_ACTIVE_LOW>;
++		};
++	};
++
++	reg_3p3v: regulator-3p3v {
++		compatible = "regulator-fixed";
++		regulator-name = "fixed-3.3V";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		regulator-boot-on;
++		regulator-always-on;
++	};
++
++	reg_usb_5v: regulator-usb-5v {
++		compatible = "regulator-fixed";
++		regulator-name = "usb-5v";
++		regulator-min-microvolt = <5000000>;
++		regulator-max-microvolt = <5000000>;
++		regulator-boot-on;
++		regulator-always-on;
++	};
++
++	/*
++	 * No backlight node. The panel is out of scope for this build, and the
++	 * official convention on mt7987 is that pwm consumers carry no pinctrl
++	 * of their own, so PWM2 is left unmuxed until the display work.
++	 */
++};
++
++&eth {
++	status = "okay";
++};
++
++/*
++ * Fan. The cooling-levels array is deliberately NOT overridden: mt7987.dtsi
++ * defines <0 128 192 255> and the cpu-thermal cooling-maps reference those by
++ * index (<&fan 3 3>, <&fan 2 2>, <&fan 1 1>). Replacing the array would shift
++ * what each index means. No official mt7987 board overrides it.
++ * The 25-step curve from the vendor tree only makes sense alongside its
++ * fancontrol daemon, which drives pwm1 directly and bypasses the thermal zone.
++ */
++&fan {
++	pwms = <&pwm 1 50000 0>;
++	status = "okay";
++};
++
++&gmac0 {
++	phy-mode = "2500base-x";
++	phy-handle = <&phy0>;
++	status = "okay";
++};
++
++&gmac1 {
++	phy-mode = "internal";
++	phy-handle = <&phy1>;
++	status = "okay";
++};
++
++&mdio {
++	/*
++	 * RTL8221B-VB-CG 2.5Gbps PHY, eth0.
++	 * NOTE: E87N wires this PHY at MDIO address 3, not the h5000m value of 1.
++	 */
++	phy0: phy@3 {
++		compatible = "ethernet-phy-ieee802.3-c45";
++		reg = <3>;
++		reset-gpios = <&pio 42 GPIO_ACTIVE_LOW>;
++		reset-assert-us = <100000>;
++		reset-deassert-us = <100000>;
++		interrupt-parent = <&pio>;
++		interrupts = <41 IRQ_TYPE_LEVEL_LOW>;
++		realtek,aldps-enable;
++	};
++
++	/* built-in 2.5G Ethernet PHY, eth1 */
++	phy1: phy@15 {
++		compatible = "ethernet-phy-ieee802.3-c45";
++		reg = <15>;
++		pinctrl-names = "i2p5gbe-led";
++		pinctrl-0 = <&i2p5gbe_led0_pins>;
++	};
++};
++
++&mmc0 {
++	pinctrl-names = "default", "state_uhs";
++	pinctrl-0 = <&mmc_pins_default>;
++	pinctrl-1 = <&mmc_pins_uhs>;
++	bus-width = <8>;
++	max-frequency = <48000000>;
++	cap-mmc-highspeed;
++	vmmc-supply = <&reg_3p3v>;
++	non-removable;
++	status = "okay";
++
++	card@0 {
++		compatible = "mmc-card";
++		reg = <0>;
++
++		block {
++			compatible = "block-device";
++
++			partitions {
++				block-partition-factory {
++					partname = "factory";
++
++					nvmem-layout {
++						compatible = "fixed-layout";
++						#address-cells = <1>;
++						#size-cells = <1>;
++
++						eeprom_factory_0: eeprom@0 {
++							reg = <0x0 0x1000>;
++						};
++					};
++				};
++			};
++		};
++	};
++};
++
++/*
++ * Two M.2 NVMe 2230 slots, one per controller. No reset-gpios on either: the
++ * only button on the board is the system reset key, which is wired to the SoC
++ * and used for factory reset / u-boot menu, not for the SSDs.
++ *
++ * Note the vendor u-boot tree (bl-mt798x-dhcpd) enables pcie0 only, because
++ * the bootloader has no need for the second slot. That is a bootloader choice,
++ * not a hardware restriction.
++ */
++&pcie0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&pcie0_pins>;
++	/* E87N wires PCIe PERST# to pio 36, active high. Same pin as the
++	 * official mt7987a-hiveton-h5000m (sister board) and as the istoreos
++	 * E87N port. Without it both controllers never leave detect.quiet. */
++	reset-gpios = <&pio 36 GPIO_ACTIVE_HIGH>;
++	status = "okay";
++};
++
++&pcie1 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&pcie1_pins>;
++	status = "okay";
++};
++
++&pio {
++	pwm_fan_pins: pwm-fan-pins {
++		mux {
++			function = "pwm";
++			groups = "pwm1_0";
++		};
++	};
++};
++
++&pwm {
++	status = "okay";
++	pinctrl-names = "default";
++	pinctrl-0 = <&pwm_fan_pins>;
++};
++
++&ssusb {
++	status = "okay";
++	vusb33-supply = <&reg_3p3v>;
++	vbus-supply = <&reg_usb_5v>;
++};
++
++&tphyu3port0 {
++	status = "okay";
++};
++
++&uart0 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart0_pins>;
++	status = "okay";
++};
++
++/*
++ * NV3007 142x428 SPI panel on spi2.
++ *
++ * First build deliberately omits this node: mt7987.dtsi leaves spi2 disabled,
++ * and muxing spi2_flash_pins would claim pins the panel does not need yet.
++ * When the fb_nv3007 driver is backported, restore:
++ *
++ *	&spi2 {
++ *		pinctrl-names = "default";
++ *		pinctrl-0 = <&spi2_flash_pins>;
++ *		status = "okay";
++ *		#address-cells = <1>;
++ *		#size-cells = <0>;
++ *
++ *		display@0 {
++ *			compatible = "newvisionu,nv3007";
++ *			reg = <0>;
++ *			regwidth = <8>;
++ *			buswidth = <8>;
++ *			width = <142>;
++ *			height = <428>;
++ *			fps = <100>;
++ *			rotate = <270>;
++ *			reset-gpios = <&pio 10 GPIO_ACTIVE_LOW>;
++ *			dc-gpios = <&pio 11 GPIO_ACTIVE_HIGH>;
++ *			spi-max-frequency = <52428800>;
++ *			status = "okay";
++ *		};
++ *	};
++ */
+diff --git a/target/linux/mediatek/filogic/base-files/etc/board.d/02_network b/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+index d8ad6f53ac..af04d22792 100644
+--- a/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
++++ b/target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+@@ -171,6 +171,7 @@ mediatek_setup_interfaces()
+ 	airpi,ap3000m|\
+ 	bananapi,bpi-r3-mini|\
+ 	edgecore,eap111|\
++	edgepi,e87n|\
+ 	hiveton,h5000m|\
+ 	huasifei,wh3000-emmc|\
+ 	huasifei,wh3000-pro-emmc|\
+@@ -324,6 +325,11 @@ mediatek_setup_macs()
+ 		lan_mac=$(macaddr_add "$wan_mac" 1)
+ 		label_mac=$wan_mac
+ 		;;
++	edgepi,e87n)
++		lan_mac=$(macaddr_generate_from_mmc_cid mmcblk0)
++		wan_mac=$(macaddr_add "$lan_mac" 1)
++		label_mac=$wan_mac
++		;;
+ 	hiveton,h5000m)
+ 		lan_mac=$(macaddr_generate_from_mmc_cid mmcblk0)
+ 		wan_mac=$(macaddr_add "$lan_mac" 1)
+diff --git a/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-hw-offload b/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-hw-offload
+new file mode 100644
+index 0000000000..0bd3302934
+--- /dev/null
++++ b/target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-hw-offload
+@@ -0,0 +1,22 @@
++#!/bin/sh
++# EdgePi E87N: enable hardware flow offloading.
++#
++# The official firewall default only sets flow_offloading (software). The
++# MT7987 ethernet driver declares .offload_version = 2 / .ppe_num = 2, so the
++# PPE can offload NAT flows in hardware -- but firewall4 only programs the
++# flowtable when flow_offloading_hw is set too.
++#
++# Guarded by board name: this file lives in the shared filogic base-files, so
++# without the case it would touch every MT798x board.
++
++. /lib/functions.sh
++
++case "$(board_name)" in
++edgepi,e87n)
++	uci -q set firewall.@defaults[0].flow_offloading='1'
++	uci -q set firewall.@defaults[0].flow_offloading_hw='1'
++	uci -q commit firewall
++	;;
++esac
++
++exit 0
+diff --git a/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh b/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
+index c37290adeb..b546d6eabd 100644
+--- a/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
++++ b/target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
+@@ -241,6 +241,7 @@ platform_do_upgrade() {
+ 	glinet,gl-mt6000|\
+ 	glinet,gl-x3000|\
+ 	glinet,gl-xe3000|\
++	edgepi,e87n|\
+ 	hiveton,h5000m|\
+ 	huasifei,wh3000-emmc|\
+ 	huasifei,wh3000-pro-emmc|\
+@@ -488,6 +489,7 @@ platform_check_image() {
+ 		;;
+ 	creatlentem,clt-r30b1|\
+ 	creatlentem,clt-r30b1-112m|\
++	edgepi,e87n|\
+ 	hiveton,h5000m|\
+ 	nradio,c8-668gl)
+ 		# tar magic `ustar`
+@@ -522,6 +524,7 @@ platform_copy_config() {
+ 	glinet,gl-x3000|\
+ 	glinet,gl-xe3000|\
+ 	globitel,bt-r320|\
++	edgepi,e87n|\
+ 	hiveton,h5000m|\
+ 	huasifei,wh3000-emmc|\
+ 	huasifei,wh3000-pro-emmc|\
+diff --git a/target/linux/mediatek/image/filogic.mk b/target/linux/mediatek/image/filogic.mk
+index d16ae5ecb1..43bf3e1bfc 100644
+--- a/target/linux/mediatek/image/filogic.mk
++++ b/target/linux/mediatek/image/filogic.mk
+@@ -2186,6 +2186,30 @@ define Device/h3c_magic-nx30-pro
+ endef
+ TARGET_DEVICES += h3c_magic-nx30-pro
+ 
++define Device/edgepi_e87n
++  DEVICE_VENDOR := EdgePi
++  DEVICE_MODEL := E87N
++  DEVICE_DTS := mt7987a-edgepi-e87n
++  DEVICE_DTS_DIR := ../dts
++  BOARD_NAME := edgepi,e87n
++  KERNEL_LOADADDR := 0x40080000
++  DEVICE_PACKAGES := \
++	-wpad-openssl \
++	mt7987-2p5g-phy-firmware \
++	kmod-hwmon-pwmfan kmod-usb3 \
++	kmod-usb-storage kmod-usb-storage-uas \
++	kmod-fs-ext4 kmod-fs-vfat kmod-fs-exfat kmod-fs-ntfs3 \
++	automount \
++	kmod-gpio-button-hotplug kmod-leds-gpio \
++	kmod-crypto-hw-safexcel \
++	kmod-nvme \
++	f2fsck mkf2fs \
++	luci luci-mod-network luci-mod-status luci-ssl-openssl
++  SUPPORTED_DEVICES += edgepi,e87n EdgePi E87N
++  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
++endef
++TARGET_DEVICES += edgepi_e87n
++
+ define Device/hiveton_h5000m
+   DEVICE_VENDOR := Hiveton
+   DEVICE_MODEL := H5000M

@@ -1,0 +1,5 @@
+immortalwrt/
+*.log
+*.dtb
+/tmp/
+.idea

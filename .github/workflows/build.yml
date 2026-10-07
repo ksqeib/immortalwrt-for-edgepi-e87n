@@ -1,0 +1,94 @@
+name: Build immortalwrt for EdgePi E87N
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: build
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            python3-setuptools rsync unzip zlib1g-dev file wget qemu-utils \
+            libelf-dev ecj fastjar java-propose-classpath java-wrapper \
+            subversion swig time xsltproc
+          df -h
+
+      - name: Clone immortalwrt master
+        run: |
+          cd build
+          git clone --branch master --single-branch --depth 1 \
+            https://github.com/immortalwrt/immortalwrt.git immortalwrt
+
+      - name: Apply E87N support
+        run: |
+          cd build
+          bash apply.sh "$PWD/immortalwrt"
+
+      - name: Cache downloads
+        uses: actions/cache@v4
+        with:
+          path: build/immortalwrt/dl
+          key: dl-${{ hashFiles('build/e87n.config') }}
+          restore-keys: dl-
+
+      - name: Cache llvm-bpf prebuilt
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: build/immortalwrt/llvm-bpf*
+          key: llvm-bpf-22.1.3
+
+      - name: Fetch prebuilt llvm-bpf toolchain
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          cd build/immortalwrt
+          VER="$(sed -n 's/^PKG_VERSION:=//p' tools/llvm-bpf/Makefile)"
+          TAR="llvm-bpf-${VER}.Linux-x86_64.tar.zst"
+          curl -fsSL --retry 3 -o "$TAR" \
+            "https://downloads.immortalwrt.org/snapshots/targets/mediatek/filogic/${TAR}"
+          tar --zstd -xf "$TAR"
+
+      - name: Configure
+        run: |
+          cd build/immortalwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          cp ../../build/e87n.config .config
+          make defconfig
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_edgepi_e87n=y$' .config \
+            || { echo "device symbol missing"; exit 1; }
+
+      - name: Download sources
+        run: |
+          cd build/immortalwrt
+          make download -j"$(nproc)" || true
+          make download -j1 -V=s
+
+      - name: Build
+        run: |
+          cd build/immortalwrt
+          make -j"$(nproc)" V=s
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: e87n-immortalwrt-firmware
+          path: |
+            build/immortalwrt/bin/targets/mediatek/filogic/*e87n*.bin
+            build/immortalwrt/bin/targets/mediatek/filogic/*e87n*.manifest
+            build/immortalwrt/bin/targets/mediatek/filogic/sha256sums
+          if-no-files-found: error

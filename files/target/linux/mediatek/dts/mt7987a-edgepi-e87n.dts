@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * EdgePi E87N (MT7987A), eMMC boot.
+ *
+ * Ported to official immortalwrt master (Linux 6.18).
+ * Baseline: the official mt7987a-hiveton-h5000m.dts, which shares this board's
+ * gpio layout (reset pio1, wps pio0, LED pio3/pio4, fan on pwm1) and eMMC boot
+ * scheme. Board-specific values taken from the EN87 vendor tree.
+ *
+ * The E87N has no wireless hardware. Both PCIe controllers carry one M.2 NVMe
+ * 2230 slot each, so pcie0 and pcie1 are both enabled; no wireless package is
+ * selected.
+ *
+ * Board-level nodes are enabled here (uart0, pwm, ssusb, pcie) because official
+ * mt7987a.dtsi only turns on boottrap/infra_bus_prot/lvts/trng/watchdog,
+ * unlike the EN87 tree which enables them at chip level.
+ */
+
+/dts-v1/;
+#include "mt7987a.dtsi"
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	model = "EdgePi E87N";
+	compatible = "edgepi,e87n", "mediatek,mt7987a", "mediatek,mt7987";
+
+	/*
+	 * 1 GiB DDR4. mt7987a.dtsi carries a "memory" node without a device_type
+	 * property, which the kernel's memory scan ignores, so this node is what
+	 * actually takes effect. Same pattern as every official mt7987 board
+	 * with 1 GiB (glinet-gl-be10000, routerich-be7200, smartrg-mt-rainier).
+	 */
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0 0x40000000 0 0x40000000>;
+	};
+
+	aliases {
+		led-boot = &led_sys;
+		led-failsafe = &led_sys;
+		led-running = &led_sys;
+		led-upgrade = &led_sys;
+		serial0 = &uart0;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,115200n1 root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs";
+		stdout-path = "serial0:115200n8";
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		button-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+
+		button-wps {
+			label = "wps";
+			linux,code = <KEY_WPS_BUTTON>;
+			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+			debounce-interval = <10>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led_sys: led-sys {
+			function = LED_FUNCTION_POWER;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&pio 4 GPIO_ACTIVE_LOW>;
+		};
+
+		led-status {
+			function = LED_FUNCTION_STATUS;
+			color = <LED_COLOR_ID_AMBER>;
+			gpios = <&pio 3 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+	reg_3p3v: regulator-3p3v {
+		compatible = "regulator-fixed";
+		regulator-name = "fixed-3.3V";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	reg_usb_5v: regulator-usb-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "usb-5v";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	/*
+	 * No backlight node. The panel is out of scope for this build, and the
+	 * official convention on mt7987 is that pwm consumers carry no pinctrl
+	 * of their own, so PWM2 is left unmuxed until the display work.
+	 */
+};
+
+&eth {
+	status = "okay";
+};
+
+/*
+ * Fan. The cooling-levels array is deliberately NOT overridden: mt7987.dtsi
+ * defines <0 128 192 255> and the cpu-thermal cooling-maps reference those by
+ * index (<&fan 3 3>, <&fan 2 2>, <&fan 1 1>). Replacing the array would shift
+ * what each index means. No official mt7987 board overrides it.
+ * The 25-step curve from the vendor tree only makes sense alongside its
+ * fancontrol daemon, which drives pwm1 directly and bypasses the thermal zone.
+ */
+&fan {
+	pwms = <&pwm 1 50000 0>;
+	status = "okay";
+};
+
+&gmac0 {
+	phy-mode = "2500base-x";
+	phy-handle = <&phy0>;
+	status = "okay";
+};
+
+&gmac1 {
+	phy-mode = "internal";
+	phy-handle = <&phy1>;
+	status = "okay";
+};
+
+&mdio {
+	/*
+	 * RTL8221B-VB-CG 2.5Gbps PHY, eth0.
+	 * NOTE: E87N wires this PHY at MDIO address 3, not the h5000m value of 1.
+	 */
+	phy0: phy@3 {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <3>;
+		reset-gpios = <&pio 42 GPIO_ACTIVE_LOW>;
+		reset-assert-us = <100000>;
+		reset-deassert-us = <100000>;
+		interrupt-parent = <&pio>;
+		interrupts = <41 IRQ_TYPE_LEVEL_LOW>;
+		realtek,aldps-enable;
+	};
+
+	/* built-in 2.5G Ethernet PHY, eth1 */
+	phy1: phy@15 {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <15>;
+		pinctrl-names = "i2p5gbe-led";
+		pinctrl-0 = <&i2p5gbe_led0_pins>;
+	};
+};
+
+&mmc0 {
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc_pins_default>;
+	pinctrl-1 = <&mmc_pins_uhs>;
+	bus-width = <8>;
+	max-frequency = <48000000>;
+	cap-mmc-highspeed;
+	vmmc-supply = <&reg_3p3v>;
+	non-removable;
+	status = "okay";
+
+	card@0 {
+		compatible = "mmc-card";
+		reg = <0>;
+
+		block {
+			compatible = "block-device";
+
+			partitions {
+				block-partition-factory {
+					partname = "factory";
+
+					nvmem-layout {
+						compatible = "fixed-layout";
+						#address-cells = <1>;
+						#size-cells = <1>;
+
+						eeprom_factory_0: eeprom@0 {
+							reg = <0x0 0x1000>;
+						};
+					};
+				};
+			};
+		};
+	};
+};
+
+/*
+ * Two M.2 NVMe 2230 slots, one per controller. No reset-gpios on either: the
+ * only button on the board is the system reset key, which is wired to the SoC
+ * and used for factory reset / u-boot menu, not for the SSDs.
+ *
+ * Note the vendor u-boot tree (bl-mt798x-dhcpd) enables pcie0 only, because
+ * the bootloader has no need for the second slot. That is a bootloader choice,
+ * not a hardware restriction.
+ */
+&pcie0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie0_pins>;
+	/* E87N wires PCIe PERST# to pio 36, active high. Same pin as the
+	 * official mt7987a-hiveton-h5000m (sister board) and as the istoreos
+	 * E87N port. Without it both controllers never leave detect.quiet. */
+	reset-gpios = <&pio 36 GPIO_ACTIVE_HIGH>;
+	status = "okay";
+};
+
+&pcie1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie1_pins>;
+	status = "okay";
+};
+
+&pio {
+	pwm_fan_pins: pwm-fan-pins {
+		mux {
+			function = "pwm";
+			groups = "pwm1_0";
+		};
+	};
+};
+
+&pwm {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&pwm_fan_pins>;
+};
+
+&ssusb {
+	status = "okay";
+	vusb33-supply = <&reg_3p3v>;
+	vbus-supply = <&reg_usb_5v>;
+};
+
+&tphyu3port0 {
+	status = "okay";
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pins>;
+	status = "okay";
+};
+
+/*
+ * NV3007 142x428 SPI panel on spi2.
+ *
+ * First build deliberately omits this node: mt7987.dtsi leaves spi2 disabled,
+ * and muxing spi2_flash_pins would claim pins the panel does not need yet.
+ * When the fb_nv3007 driver is backported, restore:
+ *
+ *	&spi2 {
+ *		pinctrl-names = "default";
+ *		pinctrl-0 = <&spi2_flash_pins>;
+ *		status = "okay";
+ *		#address-cells = <1>;
+ *		#size-cells = <0>;
+ *
+ *		display@0 {
+ *			compatible = "newvisionu,nv3007";
+ *			reg = <0>;
+ *			regwidth = <8>;
+ *			buswidth = <8>;
+ *			width = <142>;
+ *			height = <428>;
+ *			fps = <100>;
+ *			rotate = <270>;
+ *			reset-gpios = <&pio 10 GPIO_ACTIVE_LOW>;
+ *			dc-gpios = <&pio 11 GPIO_ACTIVE_HIGH>;
+ *			spi-max-frequency = <52428800>;
+ *			status = "okay";
+ *		};
+ *	};
+ */
