@@ -144,6 +144,7 @@ for s in CONFIG_TARGET_mediatek_filogic_DEVICE_edgepi_e87n \
          CONFIG_PACKAGE_kmod-fb-tft \
          CONFIG_PACKAGE_kmod-fb-tft-nv3007 \
          CONFIG_PACKAGE_e87n-screen \
+         CONFIG_PACKAGE_e87n-display \
          CONFIG_LUCI_LANG_zh_Hans; do
 	if grep -q "^$s=y$" .config; then log "    OK   $s"; else log "    丢弃 $s"; MISSING=1; fi
 done
