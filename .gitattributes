@@ -1,0 +1,31 @@
+# 仓库里的文本文件一律以 LF 存储，检出一律用 LF。
+#
+# 理由：CI 在 Linux 上跑，`bash apply.sh` 与 `git apply`/`patch` 都要求 LF。
+# 而本仓库的工作副本在 Windows 上，`core.autocrlf=true` 会把文本文件在检出时
+# 转成 CRLF —— shell 脚本带 CRLF 会以 `\r: command not found` 失败，
+# patch 文件带 CRLF 虽能被 GNU patch 容忍（"Stripping trailing CRs"）但会让
+# 行号偏移判断失真。显式钉死 eol=lf，两端行为一致。
+#
+# 只对真正需要 LF 的类型下重手，二进制（图片、固件）走 auto 不碰。
+
+* text=auto eol=lf
+
+# 明确按文本处理、一律 LF
+*.sh            text eol=lf
+*.patch         text eol=lf
+*.dts           text eol=lf
+*.dtsi          text eol=lf
+*.config        text eol=lf
+Makefile        text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.md            text eol=lf
+*.c             text eol=lf
+*.h             text eol=lf
+
+# 二进制，绝不转换
+*.png           binary
+*.jpg           binary
+*.bin           binary
+*.dtb           binary
+*.zst           binary

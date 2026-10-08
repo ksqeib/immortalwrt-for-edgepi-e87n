@@ -1,6 +1,18 @@
 name: Build immortalwrt for EdgePi E87N
 
 on:
+  push:
+    branches:
+      - master
+    # 只在真正影响固件的内容变动时构建（约 2 小时）。
+    # 纯文档改动不触发，需要时用 workflow_dispatch 手动跑。
+    paths:
+      - "apply.sh"
+      - "configs/**"
+      - "package/**"
+      - "patch/**"
+      - "files/**"
+      - ".github/workflows/build.yml"
   workflow_dispatch:
 
 jobs:
