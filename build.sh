@@ -138,13 +138,23 @@ make defconfig >>"$LOG" 2>&1 || die "defconfig 失败"
 log "  --- 关键符号落地检查（不存在的包会被 defconfig 静默丢弃）---"
 MISSING=0
 for s in CONFIG_TARGET_mediatek_filogic_DEVICE_edgepi_e87n \
+         CONFIG_PACKAGE_video-support \
          CONFIG_PACKAGE_kmod-fb \
+         CONFIG_PACKAGE_kmod-backlight \
+         CONFIG_PACKAGE_kmod-fb-tft \
          CONFIG_PACKAGE_kmod-fb-tft-nv3007 \
          CONFIG_PACKAGE_e87n-screen \
          CONFIG_LUCI_LANG_zh_Hans; do
 	if grep -q "^$s=y$" .config; then log "    OK   $s"; else log "    丢弃 $s"; MISSING=1; fi
 done
-[ "$MISSING" = 0 ] || die "有符号没落地，先看上面的清单"
+# 依赖自诊断：kmod-fb 依赖一个不带 + 的硬依赖 video-support，
+# 缺了它整条 fbdev 链会被 defconfig 静默丢弃（见 configs/e87n.config 注释）。
+if [ "$MISSING" != 0 ]; then
+	if ! grep -q "^CONFIG_PACKAGE_video-support=y$" .config; then
+		log "  ! video-support 未落地 —— 它是 kmod-fb 的硬依赖，缺了会连带丢弃整条 fbdev 链"
+	fi
+	die "有符号没落地，先看上面的清单"
+fi
 grep -q '^CONFIG_USE_LLVM_BUILD=y' .config && die "LLVM 仍走源码编译，检查步骤 3"
 log "  BPF 工具链走预编译，OK"
 el

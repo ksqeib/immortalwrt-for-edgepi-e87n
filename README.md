@@ -11,7 +11,7 @@ E87N 硬件：MT7987A、1 GiB DDR4、8 GB eMMC、双 2.5G 网口、双 M.2 NVMe 
 | --- | --- | --- | --- |
 | 基线 | 官方 immortalwrt master | immortalwrt-mt798x-6.6 fork | iStoreOS 24.10（6.6） |
 | 内核 | 6.18 | 6.6 | 6.6 |
-| 改动量 | **476 行新增、0 行删除** | 厂商 HNAT + 无线包 | 15 个 6.6 内核补丁 |
+| 改动量 | **484 行新增、0 行删除** | 厂商 HNAT + 无线包 | 15 个 6.6 内核补丁 |
 | 无线 | 不涉及（硬件没有） | 装了 MT7921/7922 全套驱动 | 不涉及 |
 | 屏幕 | 有（做成可加载模块） | 有 | 有（作者未实机验证） |
 | 风扇 | 内核 thermal 曲线，无脚本 | 厂商 fancontrol 脚本 | 厂商 fancontrol 脚本 |
@@ -96,7 +96,9 @@ istoreos 的 `999-nv3007-fbtft.patch` 共 307 行，**对既有内核文件的�
 | `patch/999-nv3007-fbtft.patch` | 内核补丁。构建时内核解包后自动套用，编出 `fb_nv3007.ko` |
 | `package/e87n-screen/` | 背光用户态包（`screen-ctl` + init.d + uci），`DEPENDS:=+kmod-fb-tft-nv3007` |
 | 板级 DTS | `&spi2` 与 `display@0` 节点已放开，`spi-max-frequency = <52000000>` |
-| `patch/e87n-openwrt.patch` | 含 `video.mk` 的 `kmod-fb-tft-nv3007` 包定义 |
+| `patch/e87n-openwrt.patch` | 含 `video.mk` 的 `kmod-fb-tft-nv3007` 包定义，以及设备块里的 `video-support` |
+
+`video-support` 必须显式选中：`kmod-fb` 与 `kmod-backlight` 对它是**不带 `+` 的硬依赖**（`video.mk` 里写的是 `DEPENDS:=video-support ...`），会渲染成 `depends on PACKAGE_video-support` 而非 `select`；而它的默认值是 `m if ALL||ALL_KMODS`，两个都不开时为 n。少了它，`kmod-fb` 被 `defconfig` 静默丢弃，整条 fbdev 链（`kmod-fb-tft-nv3007`、`e87n-screen`）跟着消失。上游同类先例是 ipq40xx 的 `ubnt_utr`，把 `video-support` 直接写进 `DEVICE_PACKAGES`。
 
 **背光不能用 `pwm-backlight`。** istoreos 实测：该驱动会抢占 GPIO524
 （`PCM_MCK_I2S_MCLK` / `pwm2_0`），结果既点不亮屏，又让该脚无法 export，屏幕全黑。
@@ -137,7 +139,9 @@ make -j16 V=s
 `make defconfig` 之后回查符号是否真落地（不存在的 `CONFIG_PACKAGE_xxx` 会被**静默丢弃**）：
 
 ```sh
-for s in CONFIG_PACKAGE_kmod-fb-tft-nv3007 CONFIG_PACKAGE_e87n-screen CONFIG_LUCI_LANG_zh_Hans; do
+for s in CONFIG_PACKAGE_video-support CONFIG_PACKAGE_kmod-fb \
+         CONFIG_PACKAGE_kmod-fb-tft-nv3007 CONFIG_PACKAGE_e87n-screen \
+         CONFIG_LUCI_LANG_zh_Hans; do
   grep -q "^$s=y" .config && echo "OK   $s" || echo "丢弃 $s"
 done
 ```

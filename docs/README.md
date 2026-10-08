@@ -52,9 +52,13 @@ ssh root@<路由器IP> "sh /tmp/diag-on-device.sh"
 `luci-app-autoreboot`、`luci-app-cloudflared`、`luci-app-ddns-go`、`luci-app-filemanager`、
 `luci-app-ttyd`、`luci-app-uhttpd`、`luci-app-wol`，外加 `btop`。
 
-屏幕三行：`kmod-fb`（级联打开整个 fbdev 栈）、`kmod-fb-tft-nv3007`（面板驱动，
-来自 `patch/999-nv3007-fbtft.patch`）、`e87n-screen`（背光用户态，来自
-`package/e87n-screen/`）。后两者由 `apply.sh` 装进树，缺了会被 `defconfig` 静默丢弃。
+屏幕四行：`video-support`（**必须显式选**，见下）、`kmod-fb`（级联打开整个
+fbdev 栈）、`kmod-fb-tft-nv3007`（面板驱动，来自 `patch/999-nv3007-fbtft.patch`）、
+`e87n-screen`（背光用户态，来自 `package/e87n-screen/`）。后两者由 `apply.sh`
+装进树，缺了会被 `defconfig` 静默丢弃。
+
+`video-support` 是 `kmod-fb` 与 `kmod-backlight` 的硬依赖（`DEPENDS` 里没写 `+`），
+而它默认不选。缺了它，整条 fbdev 链会被 `defconfig` 静默丢弃。
 
 ### 两个易错点
 
@@ -66,7 +70,9 @@ ssh root@<路由器IP> "sh /tmp/diag-on-device.sh"
 务必回查：
 
 ```sh
-for s in CONFIG_PACKAGE_kmod-fb-tft-nv3007 CONFIG_PACKAGE_e87n-screen CONFIG_LUCI_LANG_zh_Hans; do
+for s in CONFIG_PACKAGE_video-support CONFIG_PACKAGE_kmod-fb \
+         CONFIG_PACKAGE_kmod-fb-tft-nv3007 CONFIG_PACKAGE_e87n-screen \
+         CONFIG_LUCI_LANG_zh_Hans; do
   grep -q "^$s=y" .config && echo "OK   $s" || echo "丢弃 $s"
 done
 ```
