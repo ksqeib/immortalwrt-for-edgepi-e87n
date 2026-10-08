@@ -6,3 +6,4 @@ immortalwrt/
 
 # 屏幕演示帧：121552 字节的派生二进制，由 tools/mk-frame.pl 生成，不入库
 *.raw
+

@@ -12,6 +12,8 @@
 #      编出 fb_nv3007.ko。
 #   3. 把 package/e87n-screen/ 拷进树的 package/。它是屏幕背光用户态包
 #      （screen-ctl + init.d + uci），OpenWrt 会自己发现并打包。
+#   4. 把 package/e87n-display/ 拷进树。它是面板状态页的 C 渲染器，
+#      自带栅格化字模，直接写 /dev/fb0 画彩色大字号仪表盘。
 set -eu
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -37,17 +39,25 @@ KP="$SRC/target/linux/mediatek/patches-6.18/999-nv3007-fbtft.patch"
 install -D -m644 "$ROOT/patch/999-nv3007-fbtft.patch" "$KP"
 echo "    OK  $(basename "$KP") ($(wc -l < "$KP") 行)"
 
-echo "==> [3/3] 安装屏幕用户态包"
+echo "==> [3/4] 安装屏幕背光包"
 rm -rf "$SRC/package/e87n-screen"
 cp -r "$ROOT/package/e87n-screen" "$SRC/package/e87n-screen"
 echo "    OK  package/e87n-screen ($(find "$SRC/package/e87n-screen" -type f | wc -l) 个文件)"
+
+echo "==> [4/4] 安装面板状态页包（C 渲染器）"
+rm -rf "$SRC/package/e87n-display"
+cp -r "$ROOT/package/e87n-display" "$SRC/package/e87n-display"
+echo "    OK  package/e87n-display ($(find "$SRC/package/e87n-display" -type f | wc -l) 个文件)"
 
 echo "==> 校验"
 fail=0
 for f in configs/e87n.config \
          target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts \
          target/linux/mediatek/patches-6.18/999-nv3007-fbtft.patch \
-         package/e87n-screen/Makefile; do
+         package/e87n-screen/Makefile \
+         package/e87n-display/Makefile \
+         package/e87n-display/src/e87n-display.c \
+         package/e87n-display/src/e87n-font.h; do
 	if [ -f "$f" ]; then
 		echo "    OK  $f"
 	else

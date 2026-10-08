@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+# E87N 面板状态页。由 uci 的 e87n-display.settings.enabled 控制开关。
+START=99
+STOP=10
+
+start() {
+	case "$(uci -q get e87n-display.settings.enabled 2>/dev/null)" in
+		0|off|false|no|disabled) return 0 ;;
+	esac
+	[ -x /usr/sbin/e87n-display ] || return 0
+	# 背光交给 e87n-screen；这里只负责画面
+	/usr/sbin/e87n-display daemon >/dev/null 2>&1 &
+}
+
+stop() {
+	/usr/sbin/e87n-display stop >/dev/null 2>&1 || true
+}
+
+restart() { stop; start; }

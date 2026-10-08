@@ -1,13 +1,17 @@
 #!/bin/sh /etc/rc.common
-# E87N 屏幕：开机点亮背光，并按配置起状态页。
+# E87N 屏幕：开机点亮背光，并按配置决定要不要起 fbcon 文本状态页。
 #
 # 两种模式由 uci 决定（/etc/config/screen）：
-#   screen.global.status = 1（默认）→ 起 screen-status，面板显示 CPU/温度/网口等
-#   screen.global.status = 0        → 只点亮背光，内容交给别的东西写 /dev/fb0
+#   screen.global.status = 0（默认）→ 只点亮背光，/dev/fb0 交给 e87n-display
+#                                      （彩色仪表盘）或 screen-ctl raw / screen-test
+#   screen.global.status = 1        → 额外起 screen-status，fbcon 单色文本页
 #
-# 为什么状态页用 fbcon 而不是自己写像素：内核自带 8x16 字体与 VT 转义解析
+# 为什么默认 0：e87n-display 是彩色大字号仪表盘，观感更好；两者都写 /dev/fb0，
+# 同时开会互相覆盖。fbcon 版留作回退（无 C 渲染器时也能在面板上出字）。
+#
+# 为什么 fbcon 版能出字：内核自带 8x16 字体与 VT 转义解析
 # （kmod-fb 的 KCONFIG 里已开 FRAMEBUFFER_CONSOLE/VT/FONT_8x16），
-# 428x142 上是 53 列 8 行，够放一页状态，且不引入任何新依赖或专有二进制。
+# 428x142 上是 53 列 8 行，够放一页，且不引入任何新依赖或专有二进制。
 #
 # 注意：fbcon 一旦绑定，就会在 write() 时重绘整个面板，
 # 这时再往 /dev/fb0 写裸帧会被它覆盖。两者只能择一，见 README。

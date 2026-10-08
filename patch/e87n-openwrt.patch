@@ -1,9 +1,9 @@
 diff --git a/configs/e87n.config b/configs/e87n.config
 new file mode 100644
-index 0000000000..c713e20bcb
+index 0000000000..52263f8b13c9
 --- /dev/null
 +++ b/configs/e87n.config
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,71 @@
 +# EdgePi E87N build seed for official immortalwrt (master, kernel 6.18).
 +#
 +# Target and hardware packages come from the Device/edgepi_e87n block in
@@ -58,7 +58,8 @@ index 0000000000..c713e20bcb
 +# 与 package/e87n-screen/（背光用户态）。kmod-fb 会级联打开整个
 +# fbdev 栈（CONFIG_FB / CONFIG_FB_DEVICE / CONFIG_BACKLIGHT_CLASS_DEVICE
 +# / CONFIG_FB_TFT），不必手写内核符号。
-+# 屏幕未上机验证，排线状态未知；出问题可先注释掉这三行回退。
++# 屏幕已上机验证：NV3007 驱动用 EN87 厂商寄存器表后显示正常，
++# 朝向 rotate=270 / MADCTL MY|MV(0xA0) 正确（tools/fb-sweep.sh 可再扫）。
 +# video-support 是 kmod-fb / kmod-backlight 的**硬依赖**（DEPENDS 里没写 + 前缀，
 +# 渲染成 depends on 而非 select）。它的默认值是 "m if ALL||ALL_KMODS"，
 +# 两个都不开时为 n，于是 kmod-fb 被 defconfig 静默丢弃，
@@ -68,7 +69,12 @@ index 0000000000..c713e20bcb
 +CONFIG_PACKAGE_video-support=y
 +CONFIG_PACKAGE_kmod-fb=y
 +CONFIG_PACKAGE_kmod-fb-tft-nv3007=y
++# 背光与基础屏幕工具（GPIO524 直控 + screen-ctl / screen-test）
 +CONFIG_PACKAGE_e87n-screen=y
++# 面板状态页：C 渲染器，自带 Oswald 字模，直接写 /dev/fb0 画彩色仪表盘。
++# 与 e87n-screen 里的 fbcon 版 screen-status 二选一，默认走本包
++# （/etc/config/screen 的 status 已默认为 0）。
++CONFIG_PACKAGE_e87n-display=y
 diff --git a/package/kernel/linux/modules/video.mk b/package/kernel/linux/modules/video.mk
 index e48def7324..dfb96130be 100644
 --- a/package/kernel/linux/modules/video.mk

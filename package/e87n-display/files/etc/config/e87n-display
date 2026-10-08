@@ -1,0 +1,8 @@
+# E87N 面板状态页配置
+# enabled: 1 = 开机起 e87n-display 状态页；0 = 只点背光
+# interval: 刷新间隔（秒），仅对 loop 模式有效
+# iface: 强制指定要显示的网口；留空则自动选默认路由所在口
+config e87n-display 'settings'
+	option enabled '1'
+	option interval '3'
+	option iface ''
