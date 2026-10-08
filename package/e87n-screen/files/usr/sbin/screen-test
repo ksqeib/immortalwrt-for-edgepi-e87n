@@ -1,0 +1,98 @@
+#!/bin/sh
+# /usr/sbin/screen-test : 在 /dev/fb0 上画内置测试图案。
+#
+# 与 screen-ctl 的区别：screen-ctl 只能整屏纯色，本工具能画色带与棋盘格，
+# 用来检查像素映射、朝向与颜色通道。全部在设备端生成，不需要传文件。
+#
+# 为什么校验要这么严：图案由 awk 的 printf "%c" 逐字节产出，而某些 awk 实现
+# （含部分版本的 busybox awk）对数值 0 不输出 NUL 字节。一旦如此，
+# black / checker 会少掉大量字节，写进 fb 就是半帧错位的数据。
+# 所以先在临时文件上量字节数，不符就中止，绝不写 fb。
+#
+# 用法:
+#   screen-test bars      8 条竖色带（红 绿 蓝 白 黄 青 品红 灰）
+#   screen-test checker   16 像素棋盘格
+#   screen-test white|black|gray
+#   screen-test orient    四角异色 + 左上黄块，用来判断朝向与镜像
+#   screen-test info      打印 fb 尺寸与 fbcon 绑定方法
+set -u
+
+FB=/dev/fb0
+FBNAME=/sys/class/graphics/fb0
+TMP=/tmp/.screen-test.raw
+
+SZ=$(cat "$FBNAME/virtual_size" 2>/dev/null || echo "")
+W=${SZ%,*}; H=${SZ#*,}
+case "${W:-x}" in ''|*[!0-9]*) W=428; H=142 ;; esac
+case "${H:-x}" in ''|*[!0-9]*) W=428; H=142 ;; esac
+
+[ -c "$FB" ] || { echo "screen-test: $FB 不存在" >&2; exit 1; }
+
+want=$(($W * $H * 2))
+
+# 生成图案。c 为 RGB565 值，按小端写成低字节在前。
+gen() {
+	awk -v w="$W" -v h="$H" -v pat="$1" 'BEGIN{
+		for (y = 0; y < h; y++) {
+			for (x = 0; x < w; x++) {
+				if (pat == "bars") {
+					i = int(x * 8 / w);
+					c = (i==0 ? 63488 : i==1 ? 2016 : i==2 ? 31 : i==3 ? 65535 :
+					     i==4 ? 65504 : i==5 ? 2047 : i==6 ? 63519 : 33808);
+				} else if (pat == "checker") {
+					c = ((int(x/16) + int(y/16)) % 2) ? 65535 : 0;
+				} else if (pat == "orient") {
+					if (x < 60 && y < 30)             c = 63488;   # 左上 红
+					else if (x >= w-60 && y < 30)     c = 2016;    # 右上 绿
+					else if (x < 60 && y >= h-30)     c = 31;      # 左下 蓝
+					else if (x >= w-60 && y >= h-30)  c = 65535;   # 右下 白
+					else if (y >= 44 && y < 56 && x < int(w/2)) c = 65504; # 左侧黄块
+					else                              c = 8452;    # 深灰底
+				} else if (pat == "gray") {
+					c = 33808;
+				} else if (pat == "black") {
+					c = 0;
+				} else {
+					c = 65535;
+				}
+				printf "%c%c", c % 256, int(c / 256);
+			}
+		}
+	}'
+}
+
+case "${1:-}" in
+	bars|checker|orient|white|black|gray)
+		gen "$1" > "$TMP" || { echo "screen-test: 生成失败" >&2; rm -f "$TMP"; exit 1; }
+		n=$(wc -c < "$TMP" 2>/dev/null || echo 0)
+		if [ "$n" != "$want" ]; then
+			echo "screen-test: 字节数不符 —— 生成 $n，期望 $want" >&2
+			echo "  多半是本机 awk 的 printf \"%c\" 不输出 NUL 字节。" >&2
+			echo "  改用 screen-ctl raw <file> 从电脑传帧，或换 gawk。" >&2
+			rm -f "$TMP"
+			exit 1
+		fi
+		cat "$TMP" > "$FB" || { echo "screen-test: 写 $FB 失败" >&2; rm -f "$TMP"; exit 1; }
+		echo "已画 $1 ：$n 字节到 $FB"
+		rm -f "$TMP"
+		;;
+	info)
+		echo "fb=$(cat "$FBNAME/name" 2>/dev/null)  尺寸=${W}x${H}  整帧=$want 字节"
+		echo "驱动参数（运行时热调）:"
+		for p in madctl_v swap_xy off_x off_y; do
+			v=$(cat "/sys/module/fb_nv3007/parameters/$p" 2>/dev/null)
+			[ -n "${v:-}" ] && echo "  $p = $v"
+		done
+		echo "要出文字（fbcon）:"
+		for c in /sys/class/vtconsole/vtcon*; do
+			[ -e "$c/name" ] || continue
+			echo "  $(basename "$c") : $(cat "$c/name" 2>/dev/null)  bound=$(cat "$c/bind" 2>/dev/null)"
+		done
+		echo "  echo 1 > /sys/class/vtconsole/vtcon1/bind   # 名字含 'frame buffer device'"
+		echo "  echo 'E87N' > /dev/tty0"
+		;;
+	*)
+		echo "用法: $0 bars|checker|orient|white|black|gray|info" >&2
+		exit 1
+		;;
+esac

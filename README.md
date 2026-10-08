@@ -121,6 +121,57 @@ screen-ctl on|off     # 背光
 screen-ctl snapshot   # 导出当前帧
 ```
 
+### 让它显示内容
+
+驱动装上后屏幕是亮的但全空——**固件里没有任何程序往 `/dev/fb0` 写字**。
+`init.d/screen` 只做一件事：调 `screen-ctl on` 点亮背光。而 `bootargs` 里
+`console=ttyS0`，内核消息走串口，面板永远收不到。所以"亮而空"是预期行为。
+
+**两条已验证的显示路径**：
+
+**① fbcon（不用重编固件，最快出文字）**。内核的 framebuffer console 已经编进去了
+（`/sys/class/graphics/` 里能看到 `fbcon`），把它绑到 fb0 就能让 console 输出落到面板：
+
+```sh
+# 找名字含 "frame buffer device" 的那个 vtcon
+for c in /sys/class/vtconsole/vtcon*; do echo "$c: $(cat $c/name)"; done
+echo 1 > /sys/class/vtconsole/vtcon1/bind
+echo "E87N" > /dev/tty0
+```
+
+**② 直接写帧（内容完全可控）**。整帧 428x142 RGB565 小端，121552 字节。
+电脑上用 `tools/mk-frame.pl` 生成，传到设备用 `screen-ctl raw` 显示：
+
+```sh
+perl tools/mk-frame.pl /tmp/f.raw orient   # 或 text/bars/checker/gradient/gray/white/black
+scp /tmp/f.raw root@<路由器IP>:/tmp/
+ssh root@<路由器IP> "screen-ctl raw /tmp/f.raw"
+```
+
+`orient` 图案是专为对朝向做的：fb 是横的 428x142，面板物理是竖的 142x428，
+驱动靠 MADCTL 的 MV 位交换行列，所以画出来的东西可能转了 90 度或镜像。
+四角红/绿/蓝/白各不相同、黄块只占左上半区，看一眼就知道映射关系。
+
+**③ 设备端内置工具（重编固件后常驻）**。`package/e87n-screen` 里的
+`screen-test` 能在设备上直接画色带、棋盘格和 orient 图案，不需要传文件：
+
+```sh
+screen-test bars      # 8 条竖色带
+screen-test orient    # 朝向测试
+screen-test checker   # 棋盘格
+screen-test info      # fb 尺寸、驱动热调参数、fbcon 状态
+```
+
+它先在临时文件上量字节数，不符就中止、不写 fb——因为图案由 `awk` 的
+`printf "%c"` 逐字节产出，而部分 awk 实现对数值 0 不输出 NUL 字节，
+那样 `black`/`checker` 会静默写出半帧错位数据。
+
+**关于屏幕 GUI**：istoreos 带一个 LVGL 9.4 应用（`e87n-display`，自研 45870 行
++ 内嵌 lvgl 26MB，读 `/proc`、`/sys` 画系统概况/时间/网速/圆弧四页）和一个
+LuCI 界面（`luci-app-e87n`，含 `screen.js` 与 `cgi-bin/e87n`）。本仓库未收录，
+因为前者远大于本移植的全部改动量，后者依赖风扇脚本包（而我们的风扇走内核 thermal）。
+`screen-ctl` 与 `screen-test` 足够验证面板与排线。
+
 ## 构建
 
 一步到位。`apply.sh` 会打主补丁、装内核补丁、拷屏幕包：
