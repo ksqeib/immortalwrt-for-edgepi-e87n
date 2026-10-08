@@ -47,8 +47,27 @@
 #define LCD_W 428
 #define LCD_H 142
 #define GRAPH_COLS 36
-#define GRAPH_LEVELS 14
+#define GRAPH_LEVELS 9
 #define MAX_IF 6
+
+/*
+ * 版面分区。改布局只动这几个常数，绘制函数里不再散落魔数。
+ *
+ *   y  0..17   顶栏：左标题、右运行时长
+ *   y 18..76   右栏上方三格：标签 + 大数字 + 用量条
+ *   y 76..140  右栏下方：速率曲线的标题与柱体
+ *   左栏整高    网卡列表（分栏线在 x=152）
+ */
+#define HDR_BL       14    /* 顶栏标题基线 */
+#define HDR_RULE     17    /* 顶栏下横线 */
+#define LEFT_RULE    152   /* 左右分栏竖线 */
+#define LEFT_LBL_BL  30    /* 左栏 "NETWORK" 标签基线 */
+#define CELL_LBL_BL  28    /* 指标标签基线 */
+#define CELL_VAL_BL  62    /* 指标数值基线（font34，占 y30..66） */
+#define CELL_BAR_Y   69    /* 用量条 y，高 4 */
+#define GRAPH_TTL_BL 88    /* 曲线标题基线 */
+#define GRAPH_BASE   140   /* 曲线基线（x 轴） */
+#define GRAPH_STEP   5     /* 每级柱高 */
 
 /* ---------- 颜色（RGB565） ---------- */
 static uint16_t C_BG_EDGE, C_BG_CENTER, C_PANEL, C_PANEL_DARK;
@@ -336,11 +355,12 @@ typedef struct {
 	float temp;
 	char uptime[16];
 	char iface[IFNAMSIZ];          /* 速率曲线盯的那张网卡 */
-	int graph_h[GRAPH_COLS];
+	double rx_rate, tx_rate;       /* 最近一次采样的收发速率（字节/秒） */
+	double graph[GRAPH_COLS];      /* 收发合计速率的滑动窗 */
 	struct if_entry ifs[MAX_IF];
 	int n_ifs;
 	unsigned long long prev_total, prev_idle;
-	unsigned long long last_net_bytes;
+	unsigned long long last_rx, last_tx;
 	double last_net_time, next_sample;
 } Metrics;
 
@@ -479,26 +499,22 @@ static void format_rate(double b, char *out, size_t n)
 	else snprintf(out, n, "%.0f", b);
 }
 
-/* 字节/秒 -> 0..GRAPH_LEVELS 的柱高（每级约 1.78 倍） */
+/*
+ * 字节/秒 -> 0..GRAPH_LEVELS 的柱高。每级四倍，从 1K/s 一直到 256M/s：
+ *   1=1K  2=4K  3=16K  4=64K  5=256K  6=1M  7=4M  8=16M  9=64M
+ * 这样小流量看得见，2.5G 口跑满也不出格。低于 1K/s 视为静默，柱高 0。
+ */
 static int rate_to_height(double rate)
 {
 	int h = 0;
 
-	while (h < GRAPH_LEVELS && rate >= 1024.0) {
-		rate /= 1.78;
+	if (rate < 1024.0) return 0;
+	rate /= 1024.0;
+	while (h < GRAPH_LEVELS && rate >= 4.0) {
+		rate /= 4.0;
 		h++;
 	}
 	return h;
-}
-
-static double height_to_rate(int h)
-{
-	double v = 0.0;
-	int i;
-
-	for (i = 0; i < h; i++)
-		v = v ? v * 1.78 : 1024.0;
-	return v;
 }
 
 static void format_uptime(char *out, size_t n)
@@ -535,7 +551,7 @@ static void metrics_init(Metrics *m)
 
 static void metrics_update(Metrics *m, double now, int first)
 {
-	unsigned long long rx = 0, tx = 0, total;
+	unsigned long long rx = 0, tx = 0;
 	char path[256];
 	float t;
 	int rx_ok, tx_ok, i;
@@ -556,24 +572,28 @@ static void metrics_update(Metrics *m, double now, int first)
 	tx_ok = read_u64(path, &tx) == 0;
 	if (!rx_ok || !tx_ok) return;
 
-	total = rx + tx;
-	if (!m->last_net_bytes || first) {
-		m->last_net_bytes = total;
+	/* 首帧只记基准，不算速率——否则第一次会冒出一个巨大的假尖峰 */
+	if (first) {
+		m->last_rx = rx;
+		m->last_tx = tx;
 		m->last_net_time = now;
 		m->next_sample = now + 1.0;
 		return;
 	}
 	if (now >= m->next_sample) {
 		double dt = now - m->last_net_time;
-		double rate = (dt > 0 && total >= m->last_net_bytes)
-			      ? (double)(total - m->last_net_bytes) / dt : 0.0;
 
+		if (dt > 0) {
+			m->rx_rate = rx >= m->last_rx ? (double)(rx - m->last_rx) / dt : 0.0;
+			m->tx_rate = tx >= m->last_tx ? (double)(tx - m->last_tx) / dt : 0.0;
+		}
+		m->last_rx = rx;
+		m->last_tx = tx;
 		m->last_net_time = now;
-		m->last_net_bytes = total;
 		m->next_sample = now + 1.0;
 		for (i = 0; i < GRAPH_COLS - 1; i++)
-			m->graph_h[i] = m->graph_h[i + 1];
-		m->graph_h[GRAPH_COLS - 1] = rate_to_height(rate);
+			m->graph[i] = m->graph[i + 1];
+		m->graph[GRAPH_COLS - 1] = m->rx_rate + m->tx_rate;
 	}
 }
 
@@ -594,8 +614,6 @@ static void render_bg(Canvas *c)
 }
 
 /* ---------- 状态页 ---------- */
-#define LEFT_W 148
-
 static uint16_t bar_color(int pct)
 {
 	if (pct >= 80) return C_BAR_HIGH;
@@ -603,64 +621,76 @@ static uint16_t bar_color(int pct)
 	return C_BAR_LOW;
 }
 
-/* 一个「标签 + 大数字 + 进度条」的格子 */
+/* 一个「标签 + 大数字 + 用量条」的格子 */
 static void draw_metric_cell(Canvas *c, int x0, int x1, const char *label,
 			     const char *value, int pct, int with_bar)
 {
-	draw_text_center(c, font10_glyphs, FONT10_COUNT, x0, x1, 40, label, C_TEXT_DIM);
-	draw_text_fit(c, font34_glyphs, FONT34_COUNT, x0 + 8, 74,
+	draw_text_center(c, font10_glyphs, FONT10_COUNT, x0, x1, CELL_LBL_BL,
+			 label, C_TEXT_DIM);
+	draw_text_fit(c, font34_glyphs, FONT34_COUNT, x0 + 8, CELL_VAL_BL,
 		      x1 - x0 - 16, value, C_TEXT);
 	if (with_bar) {
 		int w = x1 - x0 - 22, bx = x0 + 11, fillw;
 
 		if (w < 10) w = 10;
-		fill_rect(c, bx, 80, w, 5, C_PANEL);
+		fill_rect(c, bx, CELL_BAR_Y, w, 4, C_PANEL);
 		fillw = pct * w / 100;
 		if (fillw > 0)
-			fill_rect(c, bx, 80, fillw, 5, bar_color(pct));
+			fill_rect(c, bx, CELL_BAR_Y, fillw, 4, bar_color(pct));
 	}
 }
 
 static void render_dashboard(Canvas *c, const Metrics *m)
 {
-	char buf[64], maxs[16], mins[16];
-	double mx = 0.0, mn = 1e99;
+	char buf[64], now_s[16], max_s[16];
+	double now_rate = m->rx_rate + m->tx_rate;
+	double mx = 0.0;
 	int i, k, spacing, y0;
 
 	render_bg(c);
 
-	/* 标题行：左 EDGEPI，右 运行时长（不显示时钟） */
-	draw_text(c, font14_glyphs, FONT14_COUNT, 6, 13, "EDGEPI", C_ACCENT, 1);
-	draw_text_right(c, font10_glyphs, FONT10_COUNT, LCD_W - 6, 12,
+	/* 顶栏：左标题，右运行时长（不显示时钟——看面板的人关心负载不是几点） */
+	draw_text(c, font14_glyphs, FONT14_COUNT, 6, HDR_BL, "EDGEPI", C_ACCENT, 1);
+	draw_text_right(c, font10_glyphs, FONT10_COUNT, LCD_W - 6, HDR_BL - 1,
 			m->uptime, C_TEXT_DIM);
+	hline(c, 6, LCD_W - 6, HDR_RULE, C_LINE);
 
-	/* 左栏：网卡列表 */
+	/* ---- 左栏：网卡列表 ---- */
+	draw_text(c, font10_glyphs, FONT10_COUNT, 8, LEFT_LBL_BL, "NETWORK", C_TEXT_DIM, 1);
 	if (m->n_ifs == 0) {
-		draw_text(c, font10_glyphs, FONT10_COUNT, 8, 34, "NO LINK", C_TEXT_DIM, 0);
+		draw_text(c, font10_glyphs, FONT10_COUNT, 8, LEFT_LBL_BL + 24,
+			  "no link", C_TEXT_DIM, 0);
 	} else {
-		spacing = (LCD_H - 26) / m->n_ifs;
-		if (spacing > 40) spacing = 40;
-		if (spacing < 20) spacing = 20;
-		y0 = 26 + (LCD_H - 26 - spacing * m->n_ifs) / 2 + 10;
+		/*
+		 * 每个条目占两行：名字（font14）+ 地址（font10）。
+		 * 从标签下方到面板底部均分，条目少时也不会挤在角落。
+		 */
+		int top = LEFT_LBL_BL + 12;
+		int avail = LCD_H - 6 - top;
+
+		spacing = avail / m->n_ifs;
+		if (spacing > 30) spacing = 30;
+		if (spacing < 22) spacing = 22;
+		y0 = top + ((avail - spacing * m->n_ifs) >> 1) + 10;
 		for (i = 0; i < m->n_ifs; i++) {
 			int yb = y0 + i * spacing;
 
 			draw_text(c, font14_glyphs, FONT14_COUNT, 8, yb,
 				  m->ifs[i].name, C_ACCENT, 0);
-			draw_text(c, font10_glyphs, FONT10_COUNT, 8, yb + 13,
+			draw_text(c, font10_glyphs, FONT10_COUNT, 9, yb + 12,
 				  m->ifs[i].ip, C_TEXT_MID, 0);
 		}
 	}
 
 	/* 左右分栏竖线 */
-	vline(c, LEFT_W, 4, LCD_H - 4, C_LINE);
+	vline(c, LEFT_RULE, 4, LCD_H - 5, C_LINE);
 
-	/* 右栏分三格：温度 / CPU / 内存 */
+	/* ---- 右栏上方：温度 / CPU / 内存 ---- */
 	{
-		int x0 = LEFT_W + 6;
+		int x0 = LEFT_RULE + 8;
 		int colw = (LCD_W - x0 - 6) / 3;
 
-		snprintf(buf, sizeof(buf), "%.1fC", (double)m->temp);
+		snprintf(buf, sizeof(buf), "%.0fC", (double)m->temp);
 		draw_metric_cell(c, x0, x0 + colw, "TEMP", buf, 0, 0);
 
 		snprintf(buf, sizeof(buf), "%d%%", m->cpu);
@@ -670,35 +700,38 @@ static void render_dashboard(Canvas *c, const Metrics *m)
 		draw_metric_cell(c, x0 + colw * 2, LCD_W - 6, "MEM", buf, m->mem, 1);
 	}
 
-	/* 速率曲线，标题行在曲线之上 */
-	for (i = 0; i < GRAPH_COLS; i++) {
-		double v = height_to_rate(m->graph_h[i]);
-		if (v > mx) mx = v;
-		if (v < mn) mn = v;
-	}
-	if (mn > 1e98) mn = 0.0;
-	format_rate(mx, maxs, sizeof(maxs));
-	format_rate(mn, mins, sizeof(mins));
+	/* ---- 右栏下方：速率曲线 ---- */
+	for (i = 0; i < GRAPH_COLS; i++)
+		if (m->graph[i] > mx) mx = m->graph[i];
+	format_rate(now_rate, now_s, sizeof(now_s));
+	format_rate(mx, max_s, sizeof(max_s));
 
-	snprintf(buf, sizeof(buf), "%s  RX+TX  MAX %s/s  MIN %s/s",
-		 m->iface, maxs, mins);
-	draw_text(c, font10_glyphs, FONT10_COUNT, LEFT_W + 6, 60, buf, C_TEXT_MID, 0);
+	/* 标题行：左边说明这是什么图，右边给实时速率与窗口峰值 */
+	snprintf(buf, sizeof(buf), "%s  RX+TX 240s", m->iface);
+	draw_text(c, font10_glyphs, FONT10_COUNT, LEFT_RULE + 8, GRAPH_TTL_BL,
+		  buf, C_TEXT_MID, 0);
+	snprintf(buf, sizeof(buf), "%s/s  max %s/s", now_s, max_s);
+	draw_text_right(c, font10_glyphs, FONT10_COUNT, LCD_W - 6, GRAPH_TTL_BL,
+			buf, C_TEXT_DIM);
 
-	/* 曲线基线 */
-	hline(c, LEFT_W + 6, LCD_W - 6, LCD_H - 8, C_LINE);
+	/* 基线 + 柱体 */
+	hline(c, LEFT_RULE + 8, LCD_W - 6, GRAPH_BASE, C_LINE);
+	{
+		int pitch = (LCD_W - 8 - (LEFT_RULE + 8)) / GRAPH_COLS;
 
-	for (k = 0; k < GRAPH_COLS; k++) {
-		int h = m->graph_h[k];
-		int x = LEFT_W + 8 + k * 7;
+		if (pitch < 5) pitch = 5;
+		for (k = 0; k < GRAPH_COLS; k++) {
+			int h = rate_to_height(m->graph[k]);
+			int x = LEFT_RULE + 10 + k * pitch;
 
-		if (x + 5 > LCD_W - 4) break;
-		for (i = 0; i < h; i++) {
-			int y = LCD_H - 10 - i * 4;
-			uint16_t col;
+			if (x + 4 > LCD_W - 6) break;
+			for (i = 0; i < h; i++) {
+				int y = GRAPH_BASE - 2 - i * GRAPH_STEP;
+				uint16_t col = (i >= h - 2) ? C_GRAPH_TOP : C_GRAPH_LOW;
 
-			if (y - 3 < 66) break;
-			col = (i >= h - 3) ? C_GRAPH_TOP : C_GRAPH_LOW;
-			fill_rect(c, x, y - 3, 5, 3, col);
+				if (y - GRAPH_STEP + 2 < GRAPH_TTL_BL + 4) break;
+				fill_rect(c, x, y - GRAPH_STEP + 2, 4, GRAPH_STEP, col);
+			}
 		}
 	}
 }

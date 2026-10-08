@@ -23,7 +23,7 @@ if (!TTF || !OUT) {
   process.exit(1);
 }
 
-const CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:%/+-@# ";
+const CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.:%/+-@# _";
 const SIZES = [56, 34, 14, 10];
 
 const buf = fs.readFileSync(TTF);
