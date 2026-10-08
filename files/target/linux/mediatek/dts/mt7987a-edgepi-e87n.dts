@@ -126,12 +126,28 @@
  * the same .dtsi reference levels by index (<&fan 1 1>, <&fan 2 2>,
  * <&fan 3 3>), and that mapping is unchanged: index 1/2/3 now mean 110/175/255.
  *
- * trips: overridden below. The stock curve brings the fan up at 40 degC and
- * only reaches full speed at 115 degC, which is far too late - a router that
- * idles in the low 50s would sit one step from full speed for its whole life,
- * and 115 degC is already close to the SoC's 125 degC critical trip. The curve
- * below starts at 52 degC, steps at 68 degC and is at full speed by 80 degC,
- * with 4-5 degC of hysteresis so the fan does not hunt around a step.
+ * trips: overridden below, and the thresholds come from measurement rather
+ * than from guesswork. tools/fan-sweep.sh disables the thermal zone, walks
+ * pwm1 from 0 to 255 and logs the SoC temperature at each step; run once at
+ * idle and once with four cores saturated, it moves the die by less than one
+ * degree either way:
+ *
+ *     idle     54.9 degC at pwm 0   ->  54.1 degC at pwm 255
+ *     loaded   72.8 degC at pwm 0   ->  72.0 degC at pwm 255
+ *
+ * In other words the fan is worth under 1 degC at full load, and the spread
+ * between neighbouring steps (+/-0.8 degC) is the same size as the effect
+ * being measured. The fan blows across the CPU-side heatsink only; the
+ * bottleneck is the thermal path from die to that heatsink - the pad under
+ * it is thick - and moving more air over the fins cannot help with that. A
+ * low threshold therefore buys noise, not cooling.
+ *
+ * So the steps sit above the idle range: idle is around 55 degC and stays
+ * below the first trip, 62 degC brings the fan in, 72 degC is the middle step
+ * and 82 degC is full speed - still far below the SoC's 117 degC active-hot
+ * and 125 degC critical. The point of keeping the fan at all is that the
+ * measured 0.8 degC is the honest ceiling of what it can do, not that it is
+ * useless to have; and nothing here costs anything at idle.
  *
  * NOT overridden: the critical trip stays at the 125 degC value in
  * mt7987a.dtsi. That is the last line of defence and is a property of the SoC
@@ -152,23 +168,23 @@
  * Fan speed steps. The cooling-maps in mt7987a.dtsi already wire these three
  * trips to fan levels 1, 2 and 3 in that order, so only the thresholds move.
  *
- *   <= 52 degC  level 0 (0)    fan stopped
- *     52 degC    level 1 (110)  low, just above the fan's start-up voltage
- *     68 degC    level 2 (175)  sustained high load
- *     80 degC    level 3 (255)  full speed
+ *   <= 62 degC  level 0 (0)    fan stopped (idle sits here, around 55 degC)
+ *     62 degC    level 1 (110)  low, just above the fan's start-up voltage
+ *     72 degC    level 2 (175)  four cores saturated sit here, around 73 degC
+ *     82 degC    level 3 (255)  full speed, still 35 degC below critical
  */
 &cpu_trip_active_low {
-	temperature = <52000>;
-	hysteresis = <4000>;
+	temperature = <62000>;
+	hysteresis = <5000>;
 };
 
 &cpu_trip_active_med {
-	temperature = <68000>;
+	temperature = <72000>;
 	hysteresis = <5000>;
 };
 
 &cpu_trip_active_high {
-	temperature = <80000>;
+	temperature = <82000>;
 	hysteresis = <5000>;
 };
 

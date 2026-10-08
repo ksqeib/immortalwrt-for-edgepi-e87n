@@ -68,7 +68,7 @@ echo "=== 8. DTS 关键内容自检 ==="
 D=target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts
 echo "  行数: $(wc -l < $D)"
 grep -q 'cooling-levels = <0 110 175 255>' "$D" && echo "  OK  风扇档位" || echo "  缺  风扇档位"
-grep -q 'temperature = <52000>' "$D" && echo "  OK  52C 起步" || echo "  缺  52C 起步"
+grep -q 'temperature = <62000>' "$D" && echo "  OK  62C 起步" || echo "  缺  62C 起步"
 grep -qE '^&spi2 \{' "$D" && echo "  OK  spi2 面板节点" || echo "  缺  spi2 面板节点"
 
 echo "=== 9. DTS 编译验证（内核源码就绪时才做）==="
