@@ -105,10 +105,12 @@ istoreos 的 `999-nv3007-fbtft.patch` 共 307 行，**对既有内核文件的�
 原厂 HiGoROS 的 `start_display` 也是直接操作 GPIO524。所以 DTS 里 PWM2 保持未 mux、
 不定义 backlight 节点，背光交给 `e87n-screen` 的 `screen-ctl`。
 
-驱动自带四个运行时热调参数（`/sys/module/fb_nv3007/parameters/`）：
-`madctl_v` / `swap_xy` / `off_x` / `off_y`。作者显然被这块屏折磨过——NV3007 的
-MV 行列交换行为与 CGRAM 列偏移缺少可靠文档，各厂商资料不一致，所以刷机后可 SSH 直接调，
-不用重编。
+驱动来自 EN87 厂商内核镜像恢复出的原厂实现，寄存器序列与 MADCTL 映射取自
+原始 Image，不是公开的 LVGL/ArduinoGFX 寄存器表——后者在这块屏上会显示乱码。
+
+驱动只暴露一个运行时热调参数（`/sys/module/fb_nv3007/parameters/madctl`）：
+默认 -1，表示按 DTS 里的 `rotate` 自动取 MADCTL；`rotate = <270>` 时取 `MY|MV`
+即 0xA0。刷机后可 SSH 直接改这个值试别的朝向，不用重编。
 
 点亮后 `/dev/fb0` 是 428x142 RGB565 裸帧（整帧 121552 字节）。istoreos 另带一个
 LVGL 9.4 的 GUI 应用（`e87n-display`，4 个页面），本仓库未收录；用 `screen-ctl`

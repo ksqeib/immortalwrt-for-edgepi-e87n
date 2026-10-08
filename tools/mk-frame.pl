@@ -1,17 +1,30 @@
 #!/usr/bin/perl
 # 生成 E87N 面板用的 428x142 RGB565 裸帧。
 #
-#   perl mk-frame.pl out.raw [orient|text|bars|gradient|checker|gray|white|black]
+#   perl mk-frame.pl out.raw <模式>
 #
-# 帧格式：428 宽 x 142 高，每像素 16 位 RGB565，小端（ARM 默认字节序）。
-# 整帧 428*142*2 = 121552 字节。用 `screen-ctl raw out.raw` 送到 /dev/fb0。
+# 模式：
+#   orient   四角异色 + 左上半区黄块 + E87N 白字。判断朝向与镜像。
+#   frame    1px 白边框 + 两条对角线。判断几何是否被剪切/错位。
+#   topline  只在 y=0 画一条白线，y=141 画一条红线。判断行原点的位置。
+#   leftline 只在 x=0 画一条白线，x=427 画一条红线。判断列原点的位置。
+#   hbands   8 条等宽横色带。行寻址错位会立刻显形。
+#   text     8 条竖色带 + 黑底白字 E87N
+#   bars     8 条竖色带
+#   gradient 双向渐变
+#   checker  16px 棋盘格
+#   gray / white / black   整屏纯色
 #
-# orient 模式专用于判断面板朝向：fb 是横的 428x142，面板物理是竖的 142x428，
-# 驱动靠 MADCTL 的 MV 位交换行列，所以画出来的东西在屏上可能转了 90 度或镜像。
-# 四角颜色互不相同、黄块只占左上半区，看一眼就能确定映射关系。
+# 帧格式：428 宽 x 142 高，每像素 16 位 RGB565，小端。整帧 428*142*2 = 121552 字节。
+# 用 `screen-ctl raw out.raw` 或 `cat out.raw > /dev/fb0` 送到面板。
+#
+# 为什么需要 frame / topline / leftline 这三个几何探针：
+# 驱动把 PASET 窗口写成 y+12（rotate=270 的固定偏移），若面板 GRAM 的该轴只有 142 长，
+# 窗口就超出 12 行并回卷——纯色填充看不出回卷（同色绕回去还是同色），
+# 只有结构化的图案才会显出剪切。这三个图案专门用来暴露这种错位。
 use strict; use warnings;
 
-my $out  = shift // die "用法: $0 out.raw [orient|text|bars|gradient|checker|gray|white|black]\n";
+my $out  = shift // die "用法: $0 out.raw <模式>\n";
 my $mode = shift // 'orient';
 
 my ($W, $H) = (428, 142);
@@ -33,10 +46,7 @@ sub rect {
     for my $y ($y0 .. $y1) { for my $x ($x0 .. $x1) { setpix($x, $y, $c) } }
 }
 
-sub fill_all {
-    my ($c) = @_;
-    rect(0, 0, $W - 1, $H - 1, $c);
-}
+sub fill_all { rect(0, 0, $W - 1, $H - 1, $_[0]) }
 
 # 8x8 点阵字模，bit7 在最左
 my %FONT = (
@@ -44,14 +54,9 @@ my %FONT = (
     '8' => [0x3C,0x42,0x42,0x3C,0x42,0x42,0x3C,0x00],
     '7' => [0x7E,0x02,0x04,0x08,0x10,0x10,0x10,0x00],
     'N' => [0x42,0x62,0x52,0x4A,0x46,0x42,0x42,0x00],
-    'G' => [0x3C,0x42,0x40,0x4E,0x42,0x42,0x3C,0x00],
-    'O' => [0x3C,0x42,0x42,0x42,0x42,0x42,0x3C,0x00],
-    'K' => [0x42,0x44,0x48,0x70,0x48,0x44,0x42,0x00],
     ' ' => [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00],
 );
 
-# 居中画一串字。$x0/$y0 传 undef 表示按该轴居中。
-# $bg 非空时先铺一层底，保证压在任何背景上都看得清。
 sub draw_text {
     my ($str, $scale, $x0, $y0, $fg, $bg) = @_;
     my @chars = split //, $str;
@@ -92,16 +97,41 @@ my @BARS = ($C{red}, $C{green}, $C{blue}, $C{white},
 
 if ($mode eq 'orient') {
     fill_all($C{dark});
-    # 四角：红 绿 / 蓝 白，四个都不一样，看图就知道有没有镜像
     rect(0,     0,     59,   29,   $C{red});
     rect($W-60, 0,     $W-1, 29,   $C{green});
     rect(0,     $H-30, 59,   $H-1, $C{blue});
     rect($W-60, $H-30, $W-1, $H-1, $C{white});
-    # 黄块只占左上半区：x 与 y 两个方向同时不对称，
-    # 能区分「顺时针转 90」和「逆时针转 90」
     rect(0, 44, 213, 55, $C{yellow});
-    # 文字放在下方居中，不与黄块重叠
     draw_text('E87N', 5, undef, 72, $C{white});
+
+} elsif ($mode eq 'frame') {
+    # 1px 边框 + 两条对角线。寻址整体错位时，边框会断开、对角线会折成两段。
+    fill_all($C{black});
+    for my $x (0 .. $W-1) { setpix($x, 0, $C{white}); setpix($x, $H-1, $C{white}) }
+    for my $y (0 .. $H-1) { setpix(0, $y, $C{white}); setpix($W-1, $y, $C{white}) }
+    for my $x (0 .. $W-1) {
+        my $y1 = int($x * ($H - 1) / ($W - 1));
+        setpix($x, $y1, $C{red});
+        setpix($x, ($H - 1) - $y1, $C{green});
+    }
+
+} elsif ($mode eq 'topline') {
+    # 只画两行：y=0 白、y=141 红。位置不对就说明行原点/跨度错。
+    fill_all($C{black});
+    for my $x (0 .. $W-1) { setpix($x, 0, $C{white}); setpix($x, $H-1, $C{red}) }
+
+} elsif ($mode eq 'leftline') {
+    fill_all($C{black});
+    for my $y (0 .. $H-1) { setpix(0, $y, $C{white}); setpix($W-1, $y, $C{red}) }
+
+} elsif ($mode eq 'hbands') {
+    my @b = ($C{red}, $C{green}, $C{blue}, $C{white},
+             $C{yellow}, $C{cyan}, $C{magenta}, $C{gray});
+    for my $y (0 .. $H-1) {
+        my $c = $b[int($y * scalar(@b) / $H)];
+        for my $x (0 .. $W-1) { $px[$y*$W+$x] = $c }
+    }
+
 } elsif ($mode eq 'text') {
     for my $y (0 .. $H-1) {
         for my $x (0 .. $W-1) {
@@ -109,12 +139,14 @@ if ($mode eq 'orient') {
         }
     }
     draw_text('E87N', 8, undef, undef, $C{white}, $C{black});
+
 } elsif ($mode eq 'bars') {
     for my $y (0 .. $H-1) {
         for my $x (0 .. $W-1) {
             $px[$y*$W+$x] = $BARS[int($x * scalar(@BARS) / $W)];
         }
     }
+
 } elsif ($mode eq 'gradient') {
     for my $y (0 .. $H-1) {
         for my $x (0 .. $W-1) {
@@ -124,21 +156,18 @@ if ($mode eq 'orient') {
             $px[$y*$W+$x] = ($r << 11) | ($g << 5) | $b;
         }
     }
+
 } elsif ($mode eq 'checker') {
     for my $y (0 .. $H-1) {
         for my $x (0 .. $W-1) {
             $px[$y*$W+$x] = ((int($x/16) + int($y/16)) % 2) ? $C{white} : $C{black};
         }
     }
-} elsif ($mode eq 'gray') {
-    fill_all($C{gray});
-} elsif ($mode eq 'white') {
-    fill_all($C{white});
-} elsif ($mode eq 'black') {
-    fill_all($C{black});
-} else {
-    die "未知模式: $mode\n";
-}
+
+} elsif ($mode eq 'gray')  { fill_all($C{gray})  }
+  elsif ($mode eq 'white') { fill_all($C{white}) }
+  elsif ($mode eq 'black') { fill_all($C{black}) }
+  else { die "未知模式: $mode\n" }
 
 open my $fh, '>', $out or die "打不开 $out: $!";
 binmode $fh;
@@ -147,6 +176,6 @@ $buf .= pack('v', $_) for @px;
 print $fh $buf;
 close $fh;
 
-printf "写出 %-34s 模式=%-9s %d 字节  期望 %d  %s\n",
+printf "写出 %-36s 模式=%-9s %d 字节  期望 %d  %s\n",
     $out, $mode, length($buf), $W * $H * 2,
     (length($buf) == $W * $H * 2 ? 'OK' : '不符!');

@@ -79,10 +79,8 @@ case "${1:-}" in
 	info)
 		echo "fb=$(cat "$FBNAME/name" 2>/dev/null)  尺寸=${W}x${H}  整帧=$want 字节"
 		echo "驱动参数（运行时热调）:"
-		for p in madctl_v swap_xy off_x off_y; do
-			v=$(cat "/sys/module/fb_nv3007/parameters/$p" 2>/dev/null)
-			[ -n "${v:-}" ] && echo "  $p = $v"
-		done
+		v=$(cat /sys/module/fb_nv3007/parameters/madctl 2>/dev/null)
+		[ -n "${v:-}" ] && echo "  madctl = $v   (-1 = 用驱动内置按 rotate 取值; rotate=270 -> 0xA0)"
 		echo "要出文字（fbcon）:"
 		for c in /sys/class/vtconsole/vtcon*; do
 			[ -e "$c/name" ] || continue
