@@ -1,0 +1,197 @@
+#!/bin/sh
+# /usr/sbin/screen-status : E87N 面板状态页（走内核 fbcon，写 /dev/tty0）
+#
+# 为什么走 fbcon 而不是自己画像素：
+#   kmod-fb 已经带 CONFIG_FRAMEBUFFER_CONSOLE=y / CONFIG_VT=y / CONFIG_FONT_8x16=y
+#   （见 package/kernel/linux/modules/video.mk），内核自带 8x16 点阵字体与 VT
+#   转义解析，428x142 上是 53 列 x 8 行。自写渲染器要自带字体表（FreeType 加 TTF，
+#   或一个 2 MB 的专有二进制），为了几个数字不划算。
+#
+# 面板上只出现 ASCII：内核字体只有拉丁字形，中文会显示成方块。
+# 标签沿用原厂 display-e87n 的写法（EDGEPI / WAN / CLIENTS），保证一眼认得出。
+#
+# 用法:
+#   screen-status            前台刷新，每 INTERVAL 秒一次
+#   screen-status once       只画一帧（调试）
+#   screen-status daemon     后台常驻（写 pid 文件）
+#   screen-status stop       停后台实例并清屏
+#   screen-status clear      只清屏
+set -u
+
+TTY=/dev/tty0
+PIDF=/tmp/screen-status.pid
+PREVF=/tmp/screen-status.prev
+INTERVAL="${SCREEN_STATUS_INTERVAL:-3}"
+
+g() { uci -q get "screen.global.$1" 2>/dev/null; }
+
+fbcon_on() {
+	for c in /sys/class/vtconsole/vtcon*; do
+		[ -e "$c/name" ] || continue
+		case "$(cat "$c/name" 2>/dev/null)" in
+			*frame\ buffer*) echo 1 > "$c/bind" 2>/dev/null || true ;;
+		esac
+	done
+}
+
+fbcon_off() {
+	for c in /sys/class/vtconsole/vtcon*; do
+		[ -e "$c/name" ] || continue
+		case "$(cat "$c/name" 2>/dev/null)" in
+			*frame\ buffer*) echo 0 > "$c/bind" 2>/dev/null || true ;;
+		esac
+	done
+}
+
+clear_screen() { printf '\033[?25h\033[2J\033[H' > "$TTY" 2>/dev/null || true; }
+
+# 几何不写死：从 fb 尺寸除以字体 8x16 推出来
+geom() {
+	sz=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)
+	W=${sz%,*}; H=${sz#*,}
+	case "${W:-x}" in ''|*[!0-9]*) W=428 ;; esac
+	case "${H:-x}" in ''|*[!0-9]*) H=142 ;; esac
+	COLS=$((W / 8)); ROWS=$((H / 16))
+	SEP=$(awk -v n="$COLS" 'BEGIN{s=""; for(i=0;i<n;i++) s=s"-"; print s}')
+}
+
+# 截到 COLS 列；行尾统一用 ESC[K 清干净，所以不必补空格
+fit() { printf '%s' "$1" | cut -c1-"$2"; }
+
+# $1=百分比 $2=宽度 -> [###---]
+bar() {
+	p=${1:-0}; w=${2:-10}
+	[ "$p" -gt 100 ] 2>/dev/null && p=100
+	f=$((p * w / 100)); s=""; i=0
+	while [ "$i" -lt "$w" ]; do
+		if [ "$i" -lt "$f" ]; then s="$s#"; else s="$s-"; fi
+		i=$((i + 1))
+	done
+	printf '%s' "$s"
+}
+
+m_temp() {
+	for z in /sys/class/thermal/thermal_zone*/temp; do
+		[ -r "$z" ] || continue
+		v=$(cat "$z" 2>/dev/null)
+		case "${v:-}" in ''|*[!0-9]*) continue ;; esac
+		[ "$v" -gt 1000 ] || continue
+		awk -v v="$v" 'BEGIN{printf "%.1f", v/1000}'
+		return
+	done
+	printf -- '--'
+}
+
+m_rate() {
+	awk -v b="${1:-0}" 'BEGIN{
+		if (b >= 1048576) printf "%.1fM", b/1048576;
+		else if (b >= 1024) printf "%.0fK", b/1024;
+		else printf "%.0f", b;
+	}'
+}
+
+draw() {
+	geom
+
+	# ---- 网口：优先默认路由所在的口 ----
+	IFACE=$(ip -4 route show default 2>/dev/null | awk '/default/{print $5; exit}')
+	[ -n "${IFACE:-}" ] || IFACE=$(g iface)
+	[ -n "${IFACE:-}" ] || IFACE=eth0
+
+	IP=$(ip -4 addr show dev "$IFACE" 2>/dev/null | awk '/inet /{sub(/\/.*/,"",$2); print $2; exit}')
+	[ -n "${IP:-}" ] || IP="--"
+
+	case "$(cat "/sys/class/net/$IFACE/operstate" 2>/dev/null)" in
+		up)   LINK=UP ;;
+		down) LINK=DOWN ;;
+		*)    LINK='--' ;;
+	esac
+
+	# ---- CPU jiffies（/proc/stat 第一行）/ 网络字节数 / 时间基准 ----
+	set -- $(awk '/^cpu /{t=$2+$3+$4+$5+$6+$7+$8+$9; i=$5+$6; print t, i}' /proc/stat)
+	CT=${1:-0}; CI=${2:-0}
+	NOW=$(cut -d' ' -f1 /proc/uptime)
+	RXB=$(cat "/sys/class/net/$IFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
+	TXB=$(cat "/sys/class/net/$IFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
+
+	PT=0; PI=0; PRX=0; PTX=0; PTS=0
+	[ -f "$PREVF" ] && read PT PI PRX PTX PTS < "$PREVF"
+
+	# 差分算 CPU 占用与收发速率
+	set -- $(awk -v ct="$CT" -v ci="$CI" -v now="$NOW" -v rx="$RXB" -v tx="$TXB" \
+		   -v pt="$PT" -v pi="$PI" -v prx="$PRX" -v ptx="$PTX" -v pts="$PTS" 'BEGIN{
+		dt = ct - pt; di = ci - pi;
+		cpu = (dt > 0) ? (100 * (dt - di) / dt) : 0;
+		d2 = now - pts;
+		rr = (d2 > 0 && rx >= prx) ? (rx - prx) / d2 : 0;
+		tr = (d2 > 0 && tx >= ptx) ? (tx - ptx) / d2 : 0;
+		printf "%d %d %d", int(cpu + 0.5), int(rr + 0.5), int(tr + 0.5);
+	}')
+	CPU=${1:-0}; RR=${2:-0}; TR=${3:-0}
+	printf '%s %s %s %s %s\n' "$CT" "$CI" "$RXB" "$TXB" "$NOW" > "$PREVF"
+
+	MEM=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2}
+		END{ if (t > 0) printf "%d", (100*(t-a) + t/2)/t; else print 0 }' /proc/meminfo)
+	TMP=$(m_temp)
+	LOAD=$(cut -d' ' -f1-3 /proc/loadavg)
+	UP=$(awk '{s=$1; d=int(s/86400); h=int((s%86400)/3600); m=int((s%3600)/60)
+		if (d > 0) printf "%dd%02d:%02d", d, h, m; else printf "%02d:%02d", h, m}' /proc/uptime)
+	CLI=$(awk 'NR>1 && $3=="0x2"{n++} END{print n+0}' /proc/net/arp)
+	HOST=$(cat /proc/sys/kernel/hostname 2>/dev/null)
+	[ -n "${HOST:-}" ] || HOST=e87n
+	ROOTF=$(df -h /overlay 2>/dev/null | awk 'NR==2{print $5}')
+	[ -n "${ROOTF:-}" ] || ROOTF='--'
+
+	# 第一行左右对齐：中间补空格
+	D=$(date '+%Y-%m-%d %H:%M')
+	L1='EdgePi E87N'
+		printf '\033[9;0]'    # 关 VT 消隐，否则面板无操作一段时间会自动黑掉
+	pad=$((COLS - ${#L1} - ${#D}))
+	[ "$pad" -lt 1 ] && pad=1
+	R1="$L1$(printf '%*s' "$pad" '')$D"
+
+	{
+		printf '\033[?25l'                                     # 藏光标
+		printf '\033[1;1H%s\033[K'  "$(fit "$R1" "$COLS")"
+		printf '\033[2;1H%s\033[K'  "$(fit "$SEP" "$COLS")"
+		printf '\033[3;1H%s\033[K'  "$(fit "CPU [$(bar "$CPU" 10)] ${CPU}%   TMP ${TMP}C   LOAD ${LOAD}" "$COLS")"
+		printf '\033[4;1H%s\033[K'  "$(fit "MEM [$(bar "$MEM" 10)] ${MEM}%   HOST ${HOST}" "$COLS")"
+		printf '\033[5;1H%s\033[K'  "$(fit "WAN ${IP}  ${LINK}  ${IFACE}" "$COLS")"
+		printf '\033[6;1H%s\033[K'  "$(fit "RX $(m_rate "$RR")B/s   TX $(m_rate "$TR")B/s   CLIENTS ${CLI}" "$COLS")"
+		printf '\033[7;1H%s\033[K'  "$(fit "UPTIME ${UP}   ROOT ${ROOTF} used" "$COLS")"
+		printf '\033[8;1H%s\033[K'  "$(fit "E87N  $(date '+%H:%M:%S')" "$COLS")"
+	} > "$TTY" 2>/dev/null || true
+}
+
+cleanup() { clear_screen; exit 0; }
+
+case "${1:-loop}" in
+	once)
+		fbcon_on; draw
+		;;
+	loop)
+		trap cleanup TERM INT HUP
+		fbcon_on
+		while :; do draw; sleep "$INTERVAL"; done
+		;;
+	daemon)
+		[ -f "$PIDF" ] && kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null || true
+		/usr/sbin/screen-ctl on >/dev/null 2>&1 || true
+		sh "$0" loop >/dev/null 2>&1 </dev/null &
+		echo $! > "$PIDF"
+		echo "screen-status: 已后台启动 (pid $!)"
+		;;
+	stop)
+		[ -f "$PIDF" ] && kill "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null || true
+		rm -f "$PIDF"
+		clear_screen
+		echo "screen-status: 已停止并清屏"
+		;;
+	clear)     clear_screen ;;
+	fbcon-on)  fbcon_on;  echo "fbcon 已绑定" ;;
+	fbcon-off) fbcon_off; echo "fbcon 已解绑" ;;
+	*)
+		echo "用法: $0 [loop|once|daemon|stop|clear|fbcon-on|fbcon-off]" >&2
+		exit 1
+		;;
+esac

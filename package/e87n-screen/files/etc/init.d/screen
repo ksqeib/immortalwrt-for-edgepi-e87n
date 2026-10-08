@@ -1,14 +1,33 @@
 #!/bin/sh /etc/rc.common
-# E87N 屏幕：开机点亮背光 + 默认内容（可由 /etc/config/screen 控制）
+# E87N 屏幕：开机点亮背光，并按配置起状态页。
+#
+# 两种模式由 uci 决定（/etc/config/screen）：
+#   screen.global.status = 1（默认）→ 起 screen-status，面板显示 CPU/温度/网口等
+#   screen.global.status = 0        → 只点亮背光，内容交给别的东西写 /dev/fb0
+#
+# 为什么状态页用 fbcon 而不是自己写像素：内核自带 8x16 字体与 VT 转义解析
+# （kmod-fb 的 KCONFIG 里已开 FRAMEBUFFER_CONSOLE/VT/FONT_8x16），
+# 428x142 上是 53 列 8 行，够放一页状态，且不引入任何新依赖或专有二进制。
+#
+# 注意：fbcon 一旦绑定，就会在 write() 时重绘整个面板，
+# 这时再往 /dev/fb0 写裸帧会被它覆盖。两者只能择一，见 README。
 START=98
 STOP=11
 
 start() {
-    # 点亮背光（屏幕内容由 e87n-display / 上层决定；此处只保证背光 on）
-    /usr/sbin/screen-ctl on >/dev/null 2>&1 || true
+	/usr/sbin/screen-ctl on >/dev/null 2>&1 || true
+	case "$(uci -q get screen.global.status 2>/dev/null)" in
+		0|off|false|no|disabled) ;;   # 只点背光
+		*) /usr/sbin/screen-status daemon >/dev/null 2>&1 || true ;;
+	esac
 }
 
 stop() {
-    # 关机前熄灭（可选）
-    /usr/sbin/screen-ctl off >/dev/null 2>&1 || true
+	/usr/sbin/screen-status stop >/dev/null 2>&1 || true
+	/usr/sbin/screen-ctl off >/dev/null 2>&1 || true
+}
+
+restart() {
+	stop
+	start
 }

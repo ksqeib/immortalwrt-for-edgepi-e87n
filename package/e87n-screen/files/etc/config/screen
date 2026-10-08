@@ -4,8 +4,11 @@
 # brightness: 背光反逻辑（原厂 luci-app-display 语义），brightness 低=亮 max=灭。
 #             默认 7 = 原厂 72% 亮度（percent_to_brightness(72)=26*28/100≈7）。
 # fb 固定 142x428 RGB565，整帧 121552 字节
+# status: 1 = 开机起 screen-status 状态页（fbcon 文本，53 列 x 8 行）
+#         0 = 只点亮背光，/dev/fb0 交给 screen-ctl raw / screen-test
 config screen 'global'
 	option polarity 'low'
 	option fb_size '121552'
 	option gpio '524'
 	option brightness '7'
+	option status '1'

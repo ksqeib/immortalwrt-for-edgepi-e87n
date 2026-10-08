@@ -215,3 +215,50 @@ done
 上下文行号需要核对。若 `git apply` 报错，用 `patch -p1 -l` 或 `git apply -C1` 放宽。
 
 详见 `docs/`。
+
+### 屏幕状态页
+
+面板点亮后是空的——没有任何程序往 `/dev/fb0` 写字。`e87n-screen` 现在带一个
+`screen-status`，开机自动把 CPU、温度、内存、网口速率、客户端数画到面板上，
+和原厂 `display-e87n` 的信息量对齐。
+
+它走的是内核自带的 **fbcon**（framebuffer console），不是自己画像素：
+
+```sh
+screen-status daemon    # 后台常驻，开机由 init.d/screen 拉起
+screen-status once      # 只画一帧
+screen-status stop      # 停掉并清屏
+screen-status clear     # 只清屏
+```
+
+为什么用 fbcon：`kmod-fb` 的 KCONFIG 里已经带 `CONFIG_FRAMEBUFFER_CONSOLE=y`、
+`CONFIG_VT=y`、`CONFIG_FONT_8x16=y`（见 `package/kernel/linux/modules/video.mk`），
+内核自带 8x16 点阵字体和 VT 转义解析，428x142 上是 **53 列 x 8 行**，够放一页状态。
+自写渲染器得自带字体表——要么引 FreeType 加 TTF，要么像原厂那样塞一个 2 MB 的
+专有 AArch64 二进制（`package/vendor/display-control/files/usr/sbin/display`），
+为了几个数字不值得。
+
+**fbcon 和裸帧只能择一。** fbcon 绑定后会在 `write()` 时重绘整个面板，往 `/dev/fb0`
+写的裸帧会被它覆盖；反过来，用 `screen-ctl raw` 之前要先解绑。切换：
+
+```sh
+screen-status fbcon-off    # 交给 screen-ctl raw / screen-test
+screen-status fbcon-on     # 还给状态页
+```
+
+面板上只出现 ASCII：内核字体只有拉丁字形，写中文会显示成方块。所以标签沿用
+原厂 `display-e87n` 的英文写法（`EdgePi E87N` / `WAN` / `CLIENTS`），一眼能对上。
+
+不想要状态页就关掉，只留背光：
+
+```sh
+uci set screen.global.status=0
+uci commit screen
+/etc/init.d/screen restart
+```
+
+刷新间隔可调（默认 3 秒）：
+
+```sh
+SCREEN_STATUS_INTERVAL=1 screen-status once
+```

@@ -39,6 +39,7 @@ define Package/e87n-screen/install
 	$(INSTALL_DIR) $(1)/usr/sbin $(1)/etc/init.d $(1)/etc/config
 	$(INSTALL_BIN) ./files/usr/sbin/screen-ctl $(1)/usr/sbin/screen-ctl
 	$(INSTALL_BIN) ./files/usr/sbin/screen-test $(1)/usr/sbin/screen-test
+	$(INSTALL_BIN) ./files/usr/sbin/screen-status $(1)/usr/sbin/screen-status
 	$(INSTALL_BIN) ./files/etc/init.d/screen $(1)/etc/init.d/screen
 	$(INSTALL_DATA) ./files/etc/config/screen $(1)/etc/config/screen
 endef
