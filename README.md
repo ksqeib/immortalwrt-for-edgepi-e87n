@@ -11,7 +11,7 @@ E87N 硬件：MT7987A、1 GiB DDR4、8 GB eMMC、双 2.5G 网口、双 M.2 NVMe 
 | --- | --- | --- | --- |
 | 基线 | 官方 immortalwrt master | immortalwrt-mt798x-6.6 fork | iStoreOS 24.10（6.6） |
 | 内核 | 6.18 | 6.6 | 6.6 |
-| 改动量 | **484 行新增、0 行删除** | 厂商 HNAT + 无线包 | 15 个 6.6 内核补丁 |
+| 改动量 | **490 行新增、0 行删除** | 厂商 HNAT + 无线包 | 15 个 6.6 内核补丁 |
 | 无线 | 不涉及（硬件没有） | 装了 MT7921/7922 全套驱动 | 不涉及 |
 | 屏幕 | 有（做成可加载模块） | 有 | 有（作者未实机验证） |
 | 风扇 | 内核 thermal 曲线，无脚本 | 厂商 fancontrol 脚本 | 厂商 fancontrol 脚本 |
@@ -94,7 +94,8 @@ istoreos 的 `999-nv3007-fbtft.patch` 共 307 行，**对既有内核文件的�
 | 位置 | 内容 |
 | --- | --- |
 | `patch/999-nv3007-fbtft.patch` | 内核补丁。构建时内核解包后自动套用，编出 `fb_nv3007.ko` |
-| `package/e87n-screen/` | 背光用户态包（`screen-ctl` + init.d + uci），`DEPENDS:=+kmod-fb-tft-nv3007` |
+| `package/e87n-screen/` | 背光用户态包（`screen-ctl` + `screen-test` + init.d + uci），`DEPENDS:=+kmod-fb-tft-nv3007` |
+| `package/e87n-display/` | 面板状态页 C 渲染器。自带 Oswald 字模，直写 `/dev/fb0` 画彩色仪表盘 |
 | 板级 DTS | `&spi2` 与 `display@0` 节点已放开，`spi-max-frequency = <52000000>` |
 | `patch/e87n-openwrt.patch` | 含 `video.mk` 的 `kmod-fb-tft-nv3007` 包定义，以及设备块里的 `video-support` |
 
@@ -113,8 +114,9 @@ istoreos 的 `999-nv3007-fbtft.patch` 共 307 行，**对既有内核文件的�
 即 0xA0。刷机后可 SSH 直接改这个值试别的朝向，不用重编。
 
 点亮后 `/dev/fb0` 是 428x142 RGB565 裸帧（整帧 121552 字节）。istoreos 另带一个
-LVGL 9.4 的 GUI 应用（`e87n-display`，4 个页面），本仓库未收录；用 `screen-ctl`
-可以直接测面板与排线：
+LVGL 9.4 的 GUI 应用（istoreos 里也叫 `e87n-display`，4 个页面），本仓库未收录；
+本仓库的 `package/e87n-display/` 是同名的**另一件事**（自写 C 渲染器，见下方
+「屏幕状态页」）。用 `screen-ctl` 可以直接测面板与排线：
 
 ```sh
 screen-ctl status     # 看 /dev/fb0 在不在
@@ -168,11 +170,12 @@ screen-test info      # fb 尺寸、驱动热调参数、fbcon 状态
 `printf "%c"` 逐字节产出，而部分 awk 实现对数值 0 不输出 NUL 字节，
 那样 `black`/`checker` 会静默写出半帧错位数据。
 
-**关于屏幕 GUI**：istoreos 带一个 LVGL 9.4 应用（`e87n-display`，自研 45870 行
-+ 内嵌 lvgl 26MB，读 `/proc`、`/sys` 画系统概况/时间/网速/圆弧四页）和一个
-LuCI 界面（`luci-app-e87n`，含 `screen.js` 与 `cgi-bin/e87n`）。本仓库未收录，
-因为前者远大于本移植的全部改动量，后者依赖风扇脚本包（而我们的风扇走内核 thermal）。
-`screen-ctl` 与 `screen-test` 足够验证面板与排线。
+**关于 istoreos 的屏幕 GUI**：istoreos 带一个 LVGL 9.4 应用（在那边也叫
+`e87n-display`，自研 45870 行 + 内嵌 lvgl 26MB，读 `/proc`、`/sys` 画系统概况/
+时间/网速/圆弧四页）和一个 LuCI 界面（`luci-app-e87n`，含 `screen.js` 与
+`cgi-bin/e87n`）。本仓库未收录这两个，因为前者远大于本移植的全部改动量，后者依赖
+风扇脚本包（而我们的风扇走内核 thermal）。本仓库**自己的** `package/e87n-display/`
+与它无关，是自写的 C 渲染器，见下方「屏幕状态页」。
 
 ## 构建
 
@@ -218,47 +221,57 @@ done
 
 ### 屏幕状态页
 
-面板点亮后是空的——没有任何程序往 `/dev/fb0` 写字。`e87n-screen` 现在带一个
-`screen-status`，开机自动把 CPU、温度、内存、网口速率、客户端数画到面板上，
-和原厂 `display-e87n` 的信息量对齐。
-
-它走的是内核自带的 **fbcon**（framebuffer console），不是自己画像素：
+面板点亮后是空的——没有任何程序往 `/dev/fb0` 写字。`package/e87n-display` 负责
+把状态画上去：直接 mmap `/dev/fb0`，画彩色的大字号仪表盘。
 
 ```sh
-screen-status daemon    # 后台常驻，开机由 init.d/screen 拉起
-screen-status once      # 只画一帧
-screen-status stop      # 停掉并清屏
-screen-status clear     # 只清屏
+e87n-display once      # 只画一帧
+e87n-display           # 前台刷新（2fps）
+e87n-display daemon    # 后台常驻，开机由 init.d/e87n-display 拉起
+e87n-display stop      # 停掉并解除清屏
+e87n-display dark      # 清成黑屏
+e87n-display test      # 画棋盘格与四角异色块，验证面板映射
 ```
 
-为什么用 fbcon：`kmod-fb` 的 KCONFIG 里已经带 `CONFIG_FRAMEBUFFER_CONSOLE=y`、
-`CONFIG_VT=y`、`CONFIG_FONT_8x16=y`（见 `package/kernel/linux/modules/video.mk`），
-内核自带 8x16 点阵字体和 VT 转义解析，428x142 上是 **53 列 x 8 行**，够放一页状态。
-自写渲染器得自带字体表——要么引 FreeType 加 TTF，要么像原厂那样塞一个 2 MB 的
-专有 AArch64 二进制（`package/vendor/display-control/files/usr/sbin/display`），
-为了几个数字不值得。
+从左到右分三栏：左栏是 56px 的温度大字与时钟（带秒块）；右上是一条 240 秒的
+速率柱状图，标 MAX/MIN；右下是 CPU / MEMORY / CLIENTS 三个指标，前两个带进度条
+（低于 50% 绿、50-79% 黄、80% 以上红），底行显示 WAN 地址与链路状态。
 
-**fbcon 和裸帧只能择一。** fbcon 绑定后会在 `write()` 时重绘整个面板，往 `/dev/fb0`
-写的裸帧会被它覆盖；反过来，用 `screen-ctl raw` 之前要先解绑。切换：
+**字模是预先烘好的。** 字形来自 `Oswald.ttf`（SIL OFL 1.1），由
+`tools/raster-font.js` 在开发机上栅格化成 `src/e87n-font.h` 里的覆盖率数组
+（56/34/14/10px 四档）。所以渲染器**不链 FreeType、运行时也不带字体文件**，
+依赖只剩 libc。改字模时才需要跑一次：
 
 ```sh
-screen-status fbcon-off    # 交给 screen-ctl raw / screen-test
-screen-status fbcon-on     # 还给状态页
+node tools/raster-font.js \
+  package/e87n-display/files/usr/share/e87n-display/Oswald.ttf \
+  package/e87n-display/src/e87n-font.h
 ```
 
-面板上只出现 ASCII：内核字体只有拉丁字形，写中文会显示成方块。所以标签沿用
-原厂 `display-e87n` 的英文写法（`EdgePi E87N` / `WAN` / `CLIENTS`），一眼能对上。
+**不抄 EN87 的 `display-control`。** 那包是一个 744 行的 FreeType 渲染器加一个
+2.1 MB 的专有 AArch64 二进制（`files/usr/sbin/display`），还依赖
+`libstdcpp`。外观参考它，代码是自己写的，也没有那份二进制。
 
-不想要状态页就关掉，只留背光：
+**渲染器与 fbcon 只能择一。** fbcon 绑定后会在 `write()` 时重绘整个面板，把
+像素盖掉，所以 `e87n-display` 启动时会先解绑 fbcon。`e87n-screen` 的
+`/etc/config/screen` 因此把 `status` 默认为 0，把 `/dev/fb0` 让给本包。
+
+`e87n-screen` 里还留着一个 fbcon 版 `screen-status`，作为没有 C 渲染器时的回退
+（内核自带 8x16 字体与 VT 转义解析，428x142 上是 53 列 x 8 行）。要改用回退版：
 
 ```sh
-uci set screen.global.status=0
-uci commit screen
+uci set screen.global.status=1
+uci set e87n-display.settings.enabled=0
+uci commit
 /etc/init.d/screen restart
+/etc/init.d/e87n-display restart
 ```
 
-刷新间隔可调（默认 3 秒）：
+面板上只出现 ASCII：内核字体只有拉丁字形，写中文会显示成方块，所以标签都用英文。
+要关掉状态页只留背光：
 
 ```sh
-SCREEN_STATUS_INTERVAL=1 screen-status once
+uci set e87n-display.settings.enabled=0
+uci commit e87n-display
+/etc/init.d/e87n-display restart
 ```

@@ -11,8 +11,9 @@
 
 ## 快速上手
 
-`apply.sh` 做三件事：打主补丁、把 `patch/999-nv3007-fbtft.patch` 装进
-`target/linux/mediatek/patches-6.18/`、把 `package/e87n-screen/` 拷进树的 `package/`。
+`apply.sh` 做四件事：打主补丁、把 `patch/999-nv3007-fbtft.patch` 装进
+`target/linux/mediatek/patches-6.18/`、把 `package/e87n-screen/` 与
+`package/e87n-display/` 拷进树的 `package/`。
 
 ```sh
 git clone -b master https://github.com/immortalwrt/immortalwrt.git
@@ -52,10 +53,11 @@ ssh root@<路由器IP> "sh /tmp/diag-on-device.sh"
 `luci-app-autoreboot`、`luci-app-cloudflared`、`luci-app-ddns-go`、`luci-app-filemanager`、
 `luci-app-ttyd`、`luci-app-uhttpd`、`luci-app-wol`，外加 `btop`。
 
-屏幕四行：`video-support`（**必须显式选**，见下）、`kmod-fb`（级联打开整个
+屏幕五行：`video-support`（**必须显式选**，见下）、`kmod-fb`（级联打开整个
 fbdev 栈）、`kmod-fb-tft-nv3007`（面板驱动，来自 `patch/999-nv3007-fbtft.patch`）、
-`e87n-screen`（背光用户态，来自 `package/e87n-screen/`）。后两者由 `apply.sh`
-装进树，缺了会被 `defconfig` 静默丢弃。
+`e87n-screen`（背光用户态，来自 `package/e87n-screen/`）、
+`e87n-display`（面板状态页 C 渲染器，来自 `package/e87n-display/`）。后三者由
+`apply.sh` 装进树，缺了会被 `defconfig` 静默丢弃。
 
 `video-support` 是 `kmod-fb` 与 `kmod-backlight` 的硬依赖（`DEPENDS` 里没写 `+`），
 而它默认不选。缺了它，整条 fbdev 链会被 `defconfig` 静默丢弃。
@@ -72,7 +74,7 @@ fbdev 栈）、`kmod-fb-tft-nv3007`（面板驱动，来自 `patch/999-nv3007-fb
 ```sh
 for s in CONFIG_PACKAGE_video-support CONFIG_PACKAGE_kmod-fb \
          CONFIG_PACKAGE_kmod-fb-tft-nv3007 CONFIG_PACKAGE_e87n-screen \
-         CONFIG_LUCI_LANG_zh_Hans; do
+         CONFIG_PACKAGE_e87n-display CONFIG_LUCI_LANG_zh_Hans; do
   grep -q "^$s=y" .config && echo "OK   $s" || echo "丢弃 $s"
 done
 ```

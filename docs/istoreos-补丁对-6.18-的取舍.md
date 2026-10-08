@@ -25,7 +25,7 @@ istoreos-for-edgepi-e87n 基于 **iStoreOS 24.10 / 内核 6.6**，为了支持 M
 | `844-cpufreq-mediatek-Add-support-for-MT7987` | 22 | `mediatek-cpufreq.c` 里 2 处 `mt7987` |
 
 前五个（pinctrl / clk / ethernet / pcs）是当年 MT7987 刚支持时的核心补丁，
-现在全部进主线——这也是本移植的主补丁只有 8 个文件、484 行新增就能启动的根本原因。
+现在全部进主线——这也是本移植的主补丁只有 8 个文件、490 行新增就能启动的根本原因。
 
 ## 仍然需要的（2 个）
 

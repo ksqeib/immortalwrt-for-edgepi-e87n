@@ -26,6 +26,7 @@ rm -f target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts
 rm -f target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-theme
 rm -f target/linux/mediatek/patches-6.18/999-nv3007-fbtft.patch
 rm -rf package/e87n-screen
+rm -rf package/e87n-display
 rmdir configs 2>/dev/null
 echo "  已清理"
 
@@ -46,9 +47,10 @@ echo "=== 6. 装内核补丁与屏幕包（与 apply.sh 一致）==="
 install -D -m644 "$ROOT/patch/999-nv3007-fbtft.patch" \
 	target/linux/mediatek/patches-6.18/999-nv3007-fbtft.patch
 cp -r "$ROOT/package/e87n-screen" package/e87n-screen
+cp -r "$ROOT/package/e87n-display" package/e87n-display
 echo "  已装"
 
-echo "=== 7. 八个文件 ==="
+echo "=== 7. 主补丁覆盖的文件与两个包 ==="
 for f in configs/e87n.config \
          target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts \
          target/linux/mediatek/filogic/base-files/etc/board.d/01_leds \
@@ -56,7 +58,9 @@ for f in configs/e87n.config \
          target/linux/mediatek/filogic/base-files/etc/uci-defaults/99-e87n-theme \
          target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh \
          target/linux/mediatek/image/filogic.mk \
-         package/e87n-screen/Makefile; do
+         package/e87n-screen/Makefile \
+         package/e87n-display/Makefile \
+         package/e87n-display/src/e87n-display.c; do
 	[ -e "$f" ] && echo "  OK  $f" || echo "  缺  $f"
 done
 
