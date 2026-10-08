@@ -1,0 +1,176 @@
+#!/bin/sh
+# /usr/sbin/screen-ctl : E87N screen control
+# - 背光: 优先 fbdev blank（/sys/class/graphics/fb0/blank, 1=灭 0=亮，fbtft 实现），
+#   同时尝试 GPIO524 辅助（低电平有效）。GPIO 写后读回可能不变（电路拉高），
+#   实际亮灭以 fb blank + 屏幕视觉为准。
+# - 内容: 直接写 /dev/fb0（428x142 RGB565，整帧 121552 字节）
+# 用法:
+#   screen-ctl on|off|toggle              背光开关
+#   screen-ctl white|gray|black|off_fb    整屏填充(off_fb=黑屏)
+#   screen-ctl raw <file>                 显示原始 RGB565 帧
+#   screen-ctl snapshot [file]            导出当前 fb0 内容(/tmp/fb0.raw)
+#   screen-ctl status                     状态
+#   screen-ctl polarity low|high          设置背光极性
+
+FB=/dev/fb0
+FBNAME=/sys/class/graphics/fb0
+# pwm-backlight (PWM2, see DTS)
+BLDIR=/sys/class/backlight/backlight
+# 背光为反逻辑（原厂 luci-app-display/display-control 语义）：
+#   brightness 低 = 亮，brightness = max = 灭（原厂 turn_off 写 max_brightness 关屏）。
+#   原厂 percent_to_brightness(p) = max*(100-p)/100；默认 72% 亮度 -> brightness≈7。
+BL_DEFAULT=7
+GPIO=524
+D=/sys/class/gpio/gpio$GPIO
+CFG=/etc/config/screen
+
+g()  { uci -q get "screen.global.$1" 2>/dev/null; }
+
+gpio_export() {
+    [ -d "$D" ] || { echo $GPIO > /sys/class/gpio/export 2>/dev/null; }
+    [ -d "$D" ] || return 1
+    echo out > "$D/direction" 2>/dev/null
+    return 0
+}
+
+# GPIO 辅助写入（低电平有效: want=1 亮 -> 写0；want=0 灭 -> 写1）
+gpio_write() {
+    local want=$1 pol on
+    gpio_export || return 0
+    pol=$(g polarity); pol=${pol:-low}
+    if [ "$want" = "1" ]; then
+        on=$([ "$pol" = "low" ] && echo 0 || echo 1)
+    else
+        on=$([ "$pol" = "low" ] && echo 1 || echo 0)
+    fi
+    echo "$on" > "$D/value" 2>/dev/null
+    return 0
+}
+
+# 写入背光：want=1 亮 / 0 灭。
+# 主路径 = GPIO524（原厂 HiGoROS start_display 方案）：
+#   echo 524 > export; echo out > direction; 0=亮 1=灭（低电平有效）。
+# DTS 已禁用 pwm-backlight，避免占用 GPIO524。
+# 状态以标记文件为准（/tmp/e87n-bl.state）：GPIO524 读回恒为 1
+# （电路拉高），不能作为状态依据，否则 LuCI 状态不同步。
+bl_set() {
+    local want=$1
+    if gpio_write "$want"; then
+        :
+    elif [ -w "$FBNAME/blank" ]; then
+        # 回退: fbtft fb0/blank (0=unblank亮 1=blank灭)
+        if [ "$want" = "1" ]; then
+            echo 0 > "$FBNAME/blank" 2>/dev/null
+        else
+            echo 1 > "$FBNAME/blank" 2>/dev/null
+        fi
+    else
+        echo "screen-ctl: backlight control unavailable" >&2
+        return 1
+    fi
+    echo "$([ "$want" = "1" ] && echo on || echo off)" >/tmp/e87n-bl.state 2>/dev/null
+    return 0
+}
+
+# 状态由标记文件反映（GPIO 读回不可靠），供 status/CLI 展示
+marker_state() {
+    cat /tmp/e87n-bl.state 2>/dev/null | tr -d '\n'
+}
+
+fb_state() {
+    local pol now
+    gpio_export 2>/dev/null
+    pol=$(g polarity); pol=${pol:-low}
+    now=$(cat "$D/value" 2>/dev/null | tr -d '\n')
+    case "$now" in
+        '') echo "unknown" ;;
+        *)  if [ "$pol" = "low" ]; then
+                [ "$now" = "0" ] && echo 0 || echo 1
+            else
+                [ "$now" = "1" ] && echo 0 || echo 1
+            fi
+            ;;
+    esac
+}
+
+fsize() {
+    local v w h
+    v=$(cat "$FBNAME/virtual_size" 2>/dev/null)
+    w=${v%,*}; h=${v#*,}
+    if [ -n "$w" ] && [ -n "$h" ] && [ "$w" -gt 0 ] 2>/dev/null && [ "$h" -gt 0 ] 2>/dev/null; then
+        echo $((w*h*2))
+    else
+        echo 121552
+    fi
+}
+
+fill() {
+    # $1 = 字节值(hex)
+    local sz=$(fsize)
+    head -c "$sz" /dev/zero | tr '\000' "$1" > "$FB" 2>/dev/null
+    echo "fb filled (0x$1, $sz bytes)"
+}
+
+do_toggle() {
+    local bl st
+    bl=$(fb_state)
+    if [ "$bl" = "0" ]; then
+        bl_set 0 && echo "backlight off"
+    elif [ "$bl" = "1" ]; then
+        bl_set 1 && echo "backlight on"
+    else
+        # blank 不可读时用 GPIO 读回兜底
+        local pol now
+        gpio_export || return 1
+        pol=$(g polarity); pol=${pol:-low}
+        now=$(cat "$D/value" 2>/dev/null)
+        if [ "$pol" = "low" ] && [ "$now" = "1" ] || [ "$pol" = "high" ] && [ "$now" = "0" ]; then
+            bl_set 1 && echo "backlight on"
+        else
+            bl_set 0 && echo "backlight off"
+        fi
+    fi
+}
+
+do_snapshot() {
+    local out="${2:-/tmp/fb0.raw}"
+    local sz=$(fsize)
+    head -c "$sz" "$FB" > "$out" 2>/dev/null
+    echo "snapshot -> $out ($sz bytes)"
+}
+
+case "$1" in
+    on)   bl_set 1 && echo "backlight on" ;;
+    off)  bl_set 0 && echo "backlight off" ;;
+    toggle) do_toggle ;;
+    white) fill '\377'; bl_set 1 ;;
+    gray)  fill '\111'; bl_set 1 ;;
+    black|off_fb) fill '\000' ;;
+    raw)
+        [ -f "$2" ] || { echo "usage: screen-ctl raw <file>" >&2; exit 1; }
+        cat "$2" > "$FB" 2>/dev/null
+        bl_set 1
+        echo "raw frame shown: $2"
+        ;;
+    snapshot) do_snapshot "$@" ;;
+    status)
+        echo "fb=$(cat $FBNAME/name 2>/dev/null) vsize=$(cat $FBNAME/virtual_size 2>/dev/null) state=$(marker_state)"
+        if [ -d "$D" ]; then
+            echo "backlight gpio$GPIO val=$(cat $D/value) polarity=$(g polarity) marker=$(cat /tmp/e87n-bl.state 2>/dev/null)"
+        else
+            echo "backlight gpio$GPIO not exported"
+        fi
+        ;;
+    polarity)
+        case "$2" in
+            low|high)
+                [ -d /etc/config ] && { uci set screen.global.polarity=$2; uci commit screen; }
+                echo "polarity -> $2"
+                ;;
+            *) echo "usage: screen-ctl polarity low|high" >&2; exit 1 ;;
+        esac
+        ;;
+    *)
+        echo "usage: $0 on|off|toggle|white|gray|black|raw <file>|snapshot [file]|status|polarity low|high"
+        ;;
+esac

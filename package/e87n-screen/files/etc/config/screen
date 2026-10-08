@@ -1,0 +1,11 @@
+# E87N 屏幕控制配置
+# polarity: low = GPIO524 低电平亮（0=on,1=off，backup/screen-ctl 实测）
+#           high= 高电平亮（1=on,0=off，calib_screen 观测）
+# brightness: 背光反逻辑（原厂 luci-app-display 语义），brightness 低=亮 max=灭。
+#             默认 7 = 原厂 72% 亮度（percent_to_brightness(72)=26*28/100≈7）。
+# fb 固定 142x428 RGB565，整帧 121552 字节
+config screen 'global'
+	option polarity 'low'
+	option fb_size '121552'
+	option gpio '524'
+	option brightness '7'

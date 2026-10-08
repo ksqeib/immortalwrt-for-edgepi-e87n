@@ -37,7 +37,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/immortalwrt/dl
-          key: dl-${{ hashFiles('build/e87n.config') }}
+          key: dl-${{ hashFiles('build/configs/e87n.config') }}
           restore-keys: dl-
 
       - name: Cache llvm-bpf prebuilt
@@ -62,7 +62,7 @@ jobs:
           cd build/immortalwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          cp ../../build/e87n.config .config
+          cp ../../build/configs/e87n.config .config
           make defconfig
           grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_edgepi_e87n=y$' .config \
             || { echo "device symbol missing"; exit 1; }

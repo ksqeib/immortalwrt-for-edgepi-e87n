@@ -1,9 +1,9 @@
 diff --git a/configs/e87n.config b/configs/e87n.config
 new file mode 100644
-index 0000000000..75880b8e63
+index 0000000000..936954c66b
 --- /dev/null
 +++ b/configs/e87n.config
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,58 @@
 +# EdgePi E87N build seed for official immortalwrt (master, kernel 6.18).
 +#
 +# Target and hardware packages come from the Device/edgepi_e87n block in
@@ -52,12 +52,49 @@ index 0000000000..75880b8e63
 +
 +# ---- 系统工具 ----
 +CONFIG_PACKAGE_btop=y
++
++# ---- 屏幕 ----
++# 依赖 apply.sh 装进树的 patch/999-nv3007-fbtft.patch（内核驱动）
++# 与 package/e87n-screen/（背光用户态）。kmod-fb 会级联打开整个
++# fbdev 栈（CONFIG_FB / CONFIG_FB_DEVICE / CONFIG_BACKLIGHT_CLASS_DEVICE
++# / CONFIG_FB_TFT），不必手写内核符号。
++# 屏幕未上机验证，排线状态未知；出问题可先注释掉这三行回退。
++CONFIG_PACKAGE_kmod-fb=y
++CONFIG_PACKAGE_kmod-fb-tft-nv3007=y
++CONFIG_PACKAGE_e87n-screen=y
+diff --git a/package/kernel/linux/modules/video.mk b/package/kernel/linux/modules/video.mk
+index e48def7324..dfb96130be 100644
+--- a/package/kernel/linux/modules/video.mk
++++ b/package/kernel/linux/modules/video.mk
+@@ -290,6 +290,22 @@ endef
+ 
+ $(eval $(call KernelPackage,fb-tft-ili9486))
+ 
++define KernelPackage/fb-tft-nv3007
++  SUBMENU:=$(VIDEO_MENU)
++  TITLE:=FB driver for the NewVision NV3007 LCD panel
++  DEPENDS:=+kmod-fb-tft
++  KCONFIG:=CONFIG_FB_TFT_NV3007
++  FILES:=$(LINUX_DIR)/drivers/staging/fbtft/fb_nv3007.ko
++  AUTOLOAD:=$(call AutoLoad,09,fb_nv3007)
++endef
++
++define KernelPackage/fb-tft-nv3007/description
++  FB driver for the NewVision NV3007 SPI TFT panel (EdgePi E87N)
++endef
++
++$(eval $(call KernelPackage,fb-tft-nv3007))
++
++
+ 
+ define KernelPackage/multimedia-input
+   SUBMENU:=$(VIDEO_MENU)
 diff --git a/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts b/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts
 new file mode 100644
-index 0000000000..aa335c51d4
+index 0000000000..137e8b15a5
 --- /dev/null
 +++ b/target/linux/mediatek/dts/mt7987a-edgepi-e87n.dts
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,337 @@
 +// SPDX-License-Identifier: (GPL-2.0 OR MIT)
 +/*
 + * EdgePi E87N (MT7987A), eMMC boot.
@@ -71,8 +108,8 @@ index 0000000000..aa335c51d4
 + * 2230 slot each, so pcie0 and pcie1 are both enabled; no wireless package is
 + * selected.
 + *
-+ * Board-level nodes are enabled here (uart0, pwm, ssusb, pcie) because official
-+ * mt7987a.dtsi only turns on boottrap/infra_bus_prot/lvts/trng/watchdog,
++ * Board-level nodes are enabled here (uart0, pwm, ssusb, pcie, spi2) because
++ * official mt7987a.dtsi only turns on boottrap/infra_bus_prot/lvts/trng/watchdog,
 + * unlike the EN87 tree which enables them at chip level.
 + */
 +
@@ -166,9 +203,10 @@ index 0000000000..aa335c51d4
 +	};
 +
 +	/*
-+	 * No backlight node. The panel is out of scope for this build, and the
-+	 * official convention on mt7987 is that pwm consumers carry no pinctrl
-+	 * of their own, so PWM2 is left unmuxed until the display work.
++	 * The panel backlight has no node here on purpose. It is GPIO524, driven
++	 * from userspace by the e87n-screen package. A pwm-backlight node takes
++	 * that pin (PCM_MCK_I2S_MCLK / pwm2_0), which leaves the panel dark and
++	 * the GPIO unexportable. PWM2 therefore stays unmuxed.
 +	 */
 +};
 +
@@ -177,16 +215,58 @@ index 0000000000..aa335c51d4
 +};
 +
 +/*
-+ * Fan. The cooling-levels array is deliberately NOT overridden: mt7987.dtsi
-+ * defines <0 128 192 255> and the cpu-thermal cooling-maps reference those by
-+ * index (<&fan 3 3>, <&fan 2 2>, <&fan 1 1>). Replacing the array would shift
-+ * what each index means. No official mt7987 board overrides it.
-+ * The 25-step curve from the vendor tree only makes sense alongside its
-+ * fancontrol daemon, which drives pwm1 directly and bypasses the thermal zone.
++ * Fan. Two things are set here, and one is deliberately left alone.
++ *
++ * cooling-levels: mt7987a.dtsi ships <0 128 192 255>. E87N's blower is a
++ * small fan whose useful range starts around PWM 100 - below that it hums
++ * without turning - so the array becomes <0 110 175 255>. The cooling-maps in
++ * the same .dtsi reference levels by index (<&fan 1 1>, <&fan 2 2>,
++ * <&fan 3 3>), and that mapping is unchanged: index 1/2/3 now mean 110/175/255.
++ *
++ * trips: overridden below. The stock curve brings the fan up at 40 degC and
++ * only reaches full speed at 115 degC, which is far too late - a router that
++ * idles in the low 50s would sit one step from full speed for its whole life,
++ * and 115 degC is already close to the SoC's 125 degC critical trip. The curve
++ * below starts at 52 degC, steps at 68 degC and is at full speed by 80 degC,
++ * with 4-5 degC of hysteresis so the fan does not hunt around a step.
++ *
++ * NOT overridden: the critical trip stays at the 125 degC value in
++ * mt7987a.dtsi. That is the last line of defence and is a property of the SoC
++ * rather than of this board; lowering it only makes an orderly shutdown more
++ * likely, it does not make the board cooler.
++ *
++ * The vendor tree's 25-step curve is not used: it only makes sense alongside
++ * its fancontrol daemon, which drives pwm1 directly and bypasses the thermal
++ * zone entirely. Nothing in userspace touches pwm1 on this port.
 + */
 +&fan {
++	cooling-levels = <0 110 175 255>;
 +	pwms = <&pwm 1 50000 0>;
 +	status = "okay";
++};
++
++/*
++ * Fan speed steps. The cooling-maps in mt7987a.dtsi already wire these three
++ * trips to fan levels 1, 2 and 3 in that order, so only the thresholds move.
++ *
++ *   <= 52 degC  level 0 (0)    fan stopped
++ *     52 degC    level 1 (110)  low, just above the fan's start-up voltage
++ *     68 degC    level 2 (175)  sustained high load
++ *     80 degC    level 3 (255)  full speed
++ */
++&cpu_trip_active_low {
++	temperature = <52000>;
++	hysteresis = <4000>;
++};
++
++&cpu_trip_active_med {
++	temperature = <68000>;
++	hysteresis = <5000>;
++};
++
++&cpu_trip_active_high {
++	temperature = <80000>;
++	hysteresis = <5000>;
 +};
 +
 +&gmac0 {
@@ -303,6 +383,40 @@ index 0000000000..aa335c51d4
 +	pinctrl-0 = <&pwm_fan_pins>;
 +};
 +
++/*
++ * NV3007 142x428 SPI panel on spi2, which comes up as /dev/fb0 through the
++ * fbtft driver added by the patch in target/linux/mediatek/patches-6.18/.
++ *
++ * spi2 is disabled in mt7987a.dtsi. E87N boots from eMMC, so the controller is
++ * free. The panel needs only CLK/MOSI/CS; spi2_flash_pins is the group the
++ * known-good OEM DTB uses, so it is reused here.
++ *
++ * Backlight is not described here - see the comment near the top of the file.
++ * GPIO524 is driven from userspace by e87n-screen.
++ */
++&spi2 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&spi2_flash_pins>;
++	status = "okay";
++	#address-cells = <1>;
++	#size-cells = <0>;
++
++	display@0 {
++		compatible = "newvisionu,nv3007";
++		reg = <0>;
++		regwidth = <8>;
++		buswidth = <8>;
++		width = <142>;
++		height = <428>;
++		fps = <100>;
++		rotate = <270>;
++		reset-gpios = <&pio 10 GPIO_ACTIVE_LOW>;
++		dc-gpios = <&pio 11 GPIO_ACTIVE_HIGH>;
++		spi-max-frequency = <52000000>;
++		status = "okay";
++	};
++};
++
 +&ssusb {
 +	status = "okay";
 +	vusb33-supply = <&reg_3p3v>;
@@ -318,37 +432,6 @@ index 0000000000..aa335c51d4
 +	pinctrl-0 = <&uart0_pins>;
 +	status = "okay";
 +};
-+
-+/*
-+ * NV3007 142x428 SPI panel on spi2.
-+ *
-+ * First build deliberately omits this node: mt7987.dtsi leaves spi2 disabled,
-+ * and muxing spi2_flash_pins would claim pins the panel does not need yet.
-+ * When the fb_nv3007 driver is backported, restore:
-+ *
-+ *	&spi2 {
-+ *		pinctrl-names = "default";
-+ *		pinctrl-0 = <&spi2_flash_pins>;
-+ *		status = "okay";
-+ *		#address-cells = <1>;
-+ *		#size-cells = <0>;
-+ *
-+ *		display@0 {
-+ *			compatible = "newvisionu,nv3007";
-+ *			reg = <0>;
-+ *			regwidth = <8>;
-+ *			buswidth = <8>;
-+ *			width = <142>;
-+ *			height = <428>;
-+ *			fps = <100>;
-+ *			rotate = <270>;
-+ *			reset-gpios = <&pio 10 GPIO_ACTIVE_LOW>;
-+ *			dc-gpios = <&pio 11 GPIO_ACTIVE_HIGH>;
-+ *			spi-max-frequency = <52428800>;
-+ *			status = "okay";
-+ *		};
-+ *	};
-+ */
 diff --git a/target/linux/mediatek/filogic/base-files/etc/board.d/01_leds b/target/linux/mediatek/filogic/base-files/etc/board.d/01_leds
 index de8858241c..bfb711eb50 100644
 --- a/target/linux/mediatek/filogic/base-files/etc/board.d/01_leds

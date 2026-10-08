@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+# E87N 屏幕：开机点亮背光 + 默认内容（可由 /etc/config/screen 控制）
+START=98
+STOP=11
+
+start() {
+    # 点亮背光（屏幕内容由 e87n-display / 上层决定；此处只保证背光 on）
+    /usr/sbin/screen-ctl on >/dev/null 2>&1 || true
+}
+
+stop() {
+    # 关机前熄灭（可选）
+    /usr/sbin/screen-ctl off >/dev/null 2>&1 || true
+}

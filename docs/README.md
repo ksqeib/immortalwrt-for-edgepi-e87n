@@ -7,8 +7,12 @@
 | `diag-on-device.sh` | 设备端诊断脚本，只用 `/sys` 与 `/proc`，不依赖 ethtool/lsblk/lspci |
 | `fix-tree.sh` | 补丁内容变过之后，把源码树复位再重新打补丁 |
 | `luci-app-Airpifanctrl-核查.md` | 第三方风扇插件的核查结论：它把 h5000m 与 E87N 当同一设备，两处对 E87N 不适用 |
+| `istoreos-补丁对-6.18-的取舍.md` | istoreos 那 15 个内核补丁逐项核对：12 个已进上游、2 个仍需、1 个不需要 |
 
 ## 快速上手
+
+`apply.sh` 做三件事：打主补丁、把 `patch/999-nv3007-fbtft.patch` 装进
+`target/linux/mediatek/patches-6.18/`、把 `package/e87n-screen/` 拷进树的 `package/`。
 
 ```sh
 git clone -b master https://github.com/immortalwrt/immortalwrt.git
@@ -35,7 +39,7 @@ ssh root@<路由器IP> "sh /tmp/diag-on-device.sh"
 **目标与硬件**（`CONFIG_TARGET_*`）—— 只选 target 和镜像格式，硬件包全部来自
 `filogic.mk` 里的 `Device/edgepi_e87n` 块，保证 `make defconfig` 可复现。
 
-**用户空间定制**（`CONFIG_PACKAGE_*`）—— 界面与语言：
+**用户空间定制**（`CONFIG_PACKAGE_*`）—— 界面、语言与屏幕：
 
 | 项 | 真名 | 说明 |
 | --- | --- | --- |
@@ -48,6 +52,10 @@ ssh root@<路由器IP> "sh /tmp/diag-on-device.sh"
 `luci-app-autoreboot`、`luci-app-cloudflared`、`luci-app-ddns-go`、`luci-app-filemanager`、
 `luci-app-ttyd`、`luci-app-uhttpd`、`luci-app-wol`，外加 `btop`。
 
+屏幕三行：`kmod-fb`（级联打开整个 fbdev 栈）、`kmod-fb-tft-nv3007`（面板驱动，
+来自 `patch/999-nv3007-fbtft.patch`）、`e87n-screen`（背光用户态，来自
+`package/e87n-screen/`）。后两者由 `apply.sh` 装进树，缺了会被 `defconfig` 静默丢弃。
+
 ### 两个易错点
 
 1. **`luci-app-ddnsgo` 不存在**，真名是 `luci-app-ddns-go`（`feeds/luci/applications/luci-app-ddns-go`）。
@@ -58,7 +66,7 @@ ssh root@<路由器IP> "sh /tmp/diag-on-device.sh"
 务必回查：
 
 ```sh
-for s in CONFIG_PACKAGE_luci-app-wol CONFIG_LUCI_LANG_zh_Hans; do
+for s in CONFIG_PACKAGE_kmod-fb-tft-nv3007 CONFIG_PACKAGE_e87n-screen CONFIG_LUCI_LANG_zh_Hans; do
   grep -q "^$s=y" .config && echo "OK   $s" || echo "丢弃 $s"
 done
 ```
