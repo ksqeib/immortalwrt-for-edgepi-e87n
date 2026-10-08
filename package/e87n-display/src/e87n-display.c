@@ -7,22 +7,25 @@
  * src/e87n-font.h 里的覆盖率数组，所以本程序不链 FreeType，也没有任何
  * 运行时字体文件依赖。
  *
+ * 布局（左 → 右）：
+ *   左栏   网卡列表，每张有 IPv4 的网卡一行：名字 + 地址
+ *   右上   温度大字、CPU、内存三格，后两者带用量条
+ *   右下   近 240 秒收发速率柱状图
+ *
+ * 显示什么参考了 btop 的信息集（CPU / 内存 / 网络 / 温度 / 运行时长），
+ * 但去掉了磁盘与进程——这台设备上没意义，面板也放不下。
+ * 不显示当前时间：看面板的人关心的是负载，不是几点。
+ *
  * 用法:
  *   e87n-display            前台刷新（2fps）
  *   e87n-display once       只画一帧
  *   e87n-display daemon     后台常驻（写 /tmp/e87n-display.pid）
  *   e87n-display stop       停掉后台实例
  *   e87n-display dark       清成黑屏
- *   e87n-display test       画棋盘格，验证面板映射
- *
- * 为什么不用内核 fbcon：fbcon 是单色文本层，字体是内核编死的 8x16，
- * 颜色、字号、布局都改不了，做不出仪表盘。
- *
- * 为什么不用 EN87 的 display-control：那是一个 744 行 FreeType 渲染器
- * 加一个 2.1 MB 的专有 AArch64 二进制。本程序把字形预先烘成数组，
- * 源码全部可读，依赖只剩 libc。
+ *   e87n-display test       画棋盘格与四角异色块，验证面板映射
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <signal.h>
@@ -44,6 +47,8 @@
 #define LCD_W 428
 #define LCD_H 142
 #define GRAPH_COLS 36
+#define GRAPH_LEVELS 14
+#define MAX_IF 6
 
 /* ---------- 颜色（RGB565） ---------- */
 static uint16_t C_BG_EDGE, C_BG_CENTER, C_PANEL, C_PANEL_DARK;
@@ -86,12 +91,6 @@ static inline uint16_t blend565(uint16_t dst, uint16_t src, uint8_t a)
 typedef struct {
 	uint16_t pix[LCD_W * LCD_H];
 } Canvas;
-
-static void put_px(Canvas *c, int x, int y, uint16_t col)
-{
-	if ((unsigned)x >= LCD_W || (unsigned)y >= LCD_H) return;
-	c->pix[y * LCD_W + x] = col;
-}
 
 static void blend_px(Canvas *c, int x, int y, uint16_t col, uint8_t a)
 {
@@ -147,24 +146,7 @@ static void vline(Canvas *c, int x, int y0, int y1, uint16_t col)
 	for (y = y0; y <= y1; y++) c->pix[y * LCD_W + x] = col;
 }
 
-static void rounded_rect(Canvas *c, int x, int y, int w, int h, int r, uint16_t col)
-{
-	int yy, xx;
 
-	fill_rect(c, x + r, y, w - 2 * r, h, col);
-	fill_rect(c, x, y + r, r, h - 2 * r, col);
-	fill_rect(c, x + w - r, y + r, r, h - 2 * r, col);
-	for (yy = 0; yy < r; yy++)
-		for (xx = 0; xx < r; xx++) {
-			int dx = r - 1 - xx, dy = r - 1 - yy;
-			if (dx * dx + dy * dy <= r * r) {
-				put_px(c, x + xx, y + yy, col);
-				put_px(c, x + w - 1 - xx, y + yy, col);
-				put_px(c, x + xx, y + h - 1 - yy, col);
-				put_px(c, x + w - 1 - xx, y + h - 1 - yy, col);
-			}
-		}
-}
 
 /* ---------- 文字 ----------
  * 字模是预先栅格化的覆盖率位图，尺寸已定，所以绘制函数不带字号参数。
@@ -230,7 +212,7 @@ static void draw_text_right(Canvas *c, const struct e87n_glyph *tbl, int n,
 	draw_text(c, tbl, n, right - w, y_base, s, col, 0);
 }
 
-/* 横向缩放以填满 target_w：大数字靠它撑满左栏 */
+/* 横向缩放以填满 target_w：大数字靠它撑满格子 */
 static void draw_text_fit(Canvas *c, const struct e87n_glyph *tbl, int n,
 			  int x, int y_base, int target_w, const char *s, uint16_t col)
 {
@@ -266,13 +248,97 @@ static void draw_text_fit(Canvas *c, const struct e87n_glyph *tbl, int n,
 	}
 }
 
+/* ---------- 网卡 ---------- */
+struct if_entry {
+	char name[IFNAMSIZ];
+	char ip[24];
+};
+
+/*
+ * 枚举 /sys/class/net 下所有拿到 IPv4 的网卡，跳过 lo。
+ * 排序：br-lan、wan 优先，其余按名字。逻辑口名不写死——不同固件的
+ * 命名不一样（br-lan / wan / lan / eth0 / end0 都见过），一律现查。
+ */
+static int iface_rank(const char *n)
+{
+	if (!strcmp(n, "br-lan")) return 0;
+	if (!strcmp(n, "wan")) return 1;
+	if (!strncmp(n, "eth", 3)) return 2;
+	if (!strncmp(n, "lan", 3)) return 3;
+	return 4;
+}
+
+static int get_ipv4(const char *iface, char *out, size_t n)
+{
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	struct ifreq ifr;
+	struct sockaddr_in *sin;
+
+	if (fd < 0) return -1;
+	memset(&ifr, 0, sizeof(ifr));
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", iface);
+	if (ioctl(fd, SIOCGIFADDR, &ifr) < 0) { close(fd); return -1; }
+	sin = (struct sockaddr_in *)&ifr.ifr_addr;
+	snprintf(out, n, "%s", inet_ntoa(sin->sin_addr));
+	close(fd);
+	return 0;
+}
+
+static int has_ipv4(const char *iface)
+{
+	char ip[24];
+
+	return get_ipv4(iface, ip, sizeof(ip)) == 0;
+}
+
+static void sort_ifaces(struct if_entry *e, int n)
+{
+	int i, j;
+
+	for (i = 1; i < n; i++) {
+		struct if_entry key = e[i];
+
+		j = i - 1;
+		while (j >= 0 && (iface_rank(e[j].name) > iface_rank(key.name) ||
+				  (iface_rank(e[j].name) == iface_rank(key.name) &&
+				   strcmp(e[j].name, key.name) > 0))) {
+			e[j + 1] = e[j];
+			j--;
+		}
+		e[j + 1] = key;
+	}
+}
+
+static int collect_ifaces(struct if_entry *out, int max)
+{
+	DIR *d = opendir("/sys/class/net");
+	struct dirent *de;
+	int n = 0;
+
+	if (!d) return 0;
+	while ((de = readdir(d)) != NULL && n < max) {
+		if (de->d_name[0] == '.') continue;
+		if (!strcmp(de->d_name, "lo")) continue;
+		if (!has_ipv4(de->d_name)) continue;
+		snprintf(out[n].name, sizeof(out[n].name), "%s", de->d_name);
+		if (get_ipv4(de->d_name, out[n].ip, sizeof(out[n].ip)) < 0)
+			continue;
+		n++;
+	}
+	closedir(d);
+	sort_ifaces(out, n);
+	return n;
+}
+
 /* ---------- 指标 ---------- */
 typedef struct {
-	int cpu, mem, clients;
+	int cpu, mem;
 	float temp;
-	char time_s[8], sec_s[4], date_s[16];
-	char iface[IFNAMSIZ], ip[24], link[8];
+	char uptime[16];
+	char iface[IFNAMSIZ];          /* 速率曲线盯的那张网卡 */
 	int graph_h[GRAPH_COLS];
+	struct if_entry ifs[MAX_IF];
+	int n_ifs;
 	unsigned long long prev_total, prev_idle;
 	unsigned long long last_net_bytes;
 	double last_net_time, next_sample;
@@ -302,19 +368,16 @@ static int read_str(const char *path, char *out, size_t n)
 	return 0;
 }
 
-/* 默认路由所在网口；读不到再退回候选名 */
-static int choose_iface(char *out, size_t n)
+/* 速率曲线盯的网卡：默认路由出口；读不到就退回第一张列出来的网卡 */
+static void pick_primary_iface(Metrics *m)
 {
 	const char *env = getenv("E87N_DISPLAY_IFACE");
-	const char *cands[] = { "br-lan", "eth0", "eth1", "wan", "end0", NULL };
-	char path[256], line[256];
-	struct stat st;
+	char line[256];
 	FILE *fp;
-	int i;
 
 	if (env && *env) {
-		snprintf(path, sizeof(path), "/sys/class/net/%s", env);
-		if (stat(path, &st) == 0) { snprintf(out, n, "%s", env); return 0; }
+		snprintf(m->iface, sizeof(m->iface), "%s", env);
+		return;
 	}
 	fp = fopen("/proc/net/route", "r");
 	if (fp) {
@@ -322,56 +385,20 @@ static int choose_iface(char *out, size_t n)
 		while (fgets(line, sizeof(line), fp)) {
 			char name[64];
 			unsigned dst = 1, mask = 1;
+
 			if (sscanf(line, "%63s %x %*x %*x %*x %*x %*x %x",
 				   name, &dst, &mask) == 3 && dst == 0) {
-				snprintf(out, n, "%s", name);
+				snprintf(m->iface, sizeof(m->iface), "%s", name);
 				fclose(fp);
-				return 0;
+				return;
 			}
 		}
 		fclose(fp);
 	}
-	for (i = 0; cands[i]; i++) {
-		snprintf(path, sizeof(path), "/sys/class/net/%s", cands[i]);
-		if (stat(path, &st) == 0) { snprintf(out, n, "%s", cands[i]); return 0; }
-	}
-	snprintf(out, n, "eth0");
-	return -1;
-}
-
-static int get_ipv4(const char *iface, char *out, size_t n)
-{
-	int fd = socket(AF_INET, SOCK_DGRAM, 0);
-	struct ifreq ifr;
-	struct sockaddr_in *sin;
-
-	if (fd < 0) return -1;
-	memset(&ifr, 0, sizeof(ifr));
-	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", iface);
-	if (ioctl(fd, SIOCGIFADDR, &ifr) < 0) { close(fd); return -1; }
-	sin = (struct sockaddr_in *)&ifr.ifr_addr;
-	snprintf(out, n, "%s", inet_ntoa(sin->sin_addr));
-	close(fd);
-	return 0;
-}
-
-static int read_clients(void)
-{
-	FILE *fp = fopen("/proc/net/arp", "r");
-	char line[512];
-	int count = 0;
-
-	if (!fp) return 0;
-	fgets(line, sizeof(line), fp);
-	while (fgets(line, sizeof(line), fp)) {
-		unsigned flags = 0;
-		char ip[64], hw[64], mac[64], mask[64], dev[64];
-		if (sscanf(line, "%63s %63s %x %63s %63s %63s",
-			   ip, hw, &flags, mac, mask, dev) == 6 && (flags & 0x2))
-			count++;
-	}
-	fclose(fp);
-	return count;
+	if (m->n_ifs > 0)
+		snprintf(m->iface, sizeof(m->iface), "%s", m->ifs[0].name);
+	else
+		snprintf(m->iface, sizeof(m->iface), "eth0");
 }
 
 static int read_mem_percent(void)
@@ -452,12 +479,12 @@ static void format_rate(double b, char *out, size_t n)
 	else snprintf(out, n, "%.0f", b);
 }
 
-/* 字节/秒 -> 0..20 的柱高（每级约 1.78 倍，覆盖 ~3K/s 到 ~80M/s） */
+/* 字节/秒 -> 0..GRAPH_LEVELS 的柱高（每级约 1.78 倍） */
 static int rate_to_height(double rate)
 {
 	int h = 0;
 
-	while (h < 20 && rate >= 1024.0) {
+	while (h < GRAPH_LEVELS && rate >= 1024.0) {
 		rate /= 1.78;
 		h++;
 	}
@@ -474,6 +501,25 @@ static double height_to_rate(int h)
 	return v;
 }
 
+static void format_uptime(char *out, size_t n)
+{
+	double up = 0.0;
+	int d, h, m;
+
+	if (read_str("/proc/uptime", out, n) < 0) {
+		snprintf(out, n, "--");
+		return;
+	}
+	up = atof(out);
+	d = (int)(up / 86400.0);
+	h = (int)(up / 3600.0) % 24;
+	m = (int)(up / 60.0) % 60;
+	if (d > 0)
+		snprintf(out, n, "UP %dd%02d:%02d", d, h, m);
+	else
+		snprintf(out, n, "UP %02d:%02d", h, m);
+}
+
 static double mono_seconds(void)
 {
 	struct timespec ts;
@@ -485,36 +531,24 @@ static double mono_seconds(void)
 static void metrics_init(Metrics *m)
 {
 	memset(m, 0, sizeof(*m));
-	snprintf(m->ip, sizeof(m->ip), "--");
-	snprintf(m->link, sizeof(m->link), "--");
 }
 
 static void metrics_update(Metrics *m, double now, int first)
 {
-	time_t tt = time(NULL);
-	struct tm tmv;
 	unsigned long long rx = 0, tx = 0, total;
 	char path[256];
 	float t;
 	int rx_ok, tx_ok, i;
 
-	localtime_r(&tt, &tmv);
-	strftime(m->time_s, sizeof(m->time_s), "%H:%M", &tmv);
-	strftime(m->sec_s, sizeof(m->sec_s), "%S", &tmv);
-	strftime(m->date_s, sizeof(m->date_s), "%a %d %b", &tmv);
-
 	m->cpu = read_cpu_percent(m);
 	m->mem = read_mem_percent();
-	m->clients = read_clients();
 	t = read_temp();
 	if (t > 0.0f) m->temp = t;
+	format_uptime(m->uptime, sizeof(m->uptime));
 
-	if (!m->iface[0]) choose_iface(m->iface, sizeof(m->iface));
-	get_ipv4(m->iface, m->ip, sizeof(m->ip));
-
-	snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", m->iface);
-	if (read_str(path, m->link, sizeof(m->link)) < 0)
-		snprintf(m->link, sizeof(m->link), "--");
+	m->n_ifs = collect_ifaces(m->ifs, MAX_IF);
+	if (!m->iface[0])
+		pick_primary_iface(m);
 
 	snprintf(path, sizeof(path), "/sys/class/net/%s/statistics/rx_bytes", m->iface);
 	rx_ok = read_u64(path, &rx) == 0;
@@ -556,10 +590,12 @@ static void render_bg(Canvas *c)
 			c->pix[y * LCD_W + x] = col;
 	}
 	/* 左栏压暗，形成分区层次 */
-	fill_rect_alpha(c, 0, 0, 137, LCD_H, C_PANEL_DARK, 120);
+	fill_rect_alpha(c, 0, 0, 148, LCD_H, C_PANEL_DARK, 130);
 }
 
 /* ---------- 状态页 ---------- */
+#define LEFT_W 148
+
 static uint16_t bar_color(int pct)
 {
 	if (pct >= 80) return C_BAR_HIGH;
@@ -567,33 +603,74 @@ static uint16_t bar_color(int pct)
 	return C_BAR_LOW;
 }
 
+/* 一个「标签 + 大数字 + 进度条」的格子 */
+static void draw_metric_cell(Canvas *c, int x0, int x1, const char *label,
+			     const char *value, int pct, int with_bar)
+{
+	draw_text_center(c, font10_glyphs, FONT10_COUNT, x0, x1, 40, label, C_TEXT_DIM);
+	draw_text_fit(c, font34_glyphs, FONT34_COUNT, x0 + 8, 74,
+		      x1 - x0 - 16, value, C_TEXT);
+	if (with_bar) {
+		int w = x1 - x0 - 22, bx = x0 + 11, fillw;
+
+		if (w < 10) w = 10;
+		fill_rect(c, bx, 80, w, 5, C_PANEL);
+		fillw = pct * w / 100;
+		if (fillw > 0)
+			fill_rect(c, bx, 80, fillw, 5, bar_color(pct));
+	}
+}
+
 static void render_dashboard(Canvas *c, const Metrics *m)
 {
 	char buf[64], maxs[16], mins[16];
 	double mx = 0.0, mn = 1e99;
-	int vals[3], i, k;
+	int i, k, spacing, y0;
 
 	render_bg(c);
 
-	/* 分区线：左栏 / 右上曲线区 / 右下指标区 */
-	vline(c, 139, 4, 137, C_LINE);
-	vline(c, 202, 26, 82, C_LINE);
-	hline(c, 143, LCD_W - 2, 84, C_LINE);
+	/* 标题行：左 EDGEPI，右 运行时长（不显示时钟） */
+	draw_text(c, font14_glyphs, FONT14_COUNT, 6, 13, "EDGEPI", C_ACCENT, 1);
+	draw_text_right(c, font10_glyphs, FONT10_COUNT, LCD_W - 6, 12,
+			m->uptime, C_TEXT_DIM);
 
-	/* --- 左栏 --- */
-	draw_text(c, font14_glyphs, FONT14_COUNT, 8, 15, "EDGEPI", C_ACCENT, 1);
-	snprintf(buf, sizeof(buf), "%.1f", (double)m->temp);
-	draw_text_fit(c, font56_glyphs, FONT56_COUNT, 6, 65, 88, buf, C_TEXT_BRIGHT);
-	draw_text(c, font14_glyphs, FONT14_COUNT, 96, 44, "C", C_TEXT_MID, 0);
-	draw_text(c, font10_glyphs, FONT10_COUNT, 96, 57, "SYSTEM", C_TEXT_DIM, 0);
+	/* 左栏：网卡列表 */
+	if (m->n_ifs == 0) {
+		draw_text(c, font10_glyphs, FONT10_COUNT, 8, 34, "NO LINK", C_TEXT_DIM, 0);
+	} else {
+		spacing = (LCD_H - 26) / m->n_ifs;
+		if (spacing > 40) spacing = 40;
+		if (spacing < 20) spacing = 20;
+		y0 = 26 + (LCD_H - 26 - spacing * m->n_ifs) / 2 + 10;
+		for (i = 0; i < m->n_ifs; i++) {
+			int yb = y0 + i * spacing;
 
-	draw_text(c, font34_glyphs, FONT34_COUNT, 6, 104, m->time_s, C_TEXT, 0);
-	rounded_rect(c, 74, 86, 34, 22, 2, C_ACCENT);
-	draw_text_center(c, font14_glyphs, FONT14_COUNT, 74, 108, 101, m->sec_s, C_BG_CENTER);
-	draw_text(c, font10_glyphs, FONT10_COUNT, 6, 122, m->date_s, C_TEXT_DIM, 0);
+			draw_text(c, font14_glyphs, FONT14_COUNT, 8, yb,
+				  m->ifs[i].name, C_ACCENT, 0);
+			draw_text(c, font10_glyphs, FONT10_COUNT, 8, yb + 13,
+				  m->ifs[i].ip, C_TEXT_MID, 0);
+		}
+	}
 
-	/* --- 右上：速率曲线 --- */
-	draw_text(c, font14_glyphs, FONT14_COUNT, 146, 15, "LAST 240 SEC", C_TEXT_BRIGHT, 0);
+	/* 左右分栏竖线 */
+	vline(c, LEFT_W, 4, LCD_H - 4, C_LINE);
+
+	/* 右栏分三格：温度 / CPU / 内存 */
+	{
+		int x0 = LEFT_W + 6;
+		int colw = (LCD_W - x0 - 6) / 3;
+
+		snprintf(buf, sizeof(buf), "%.1fC", (double)m->temp);
+		draw_metric_cell(c, x0, x0 + colw, "TEMP", buf, 0, 0);
+
+		snprintf(buf, sizeof(buf), "%d%%", m->cpu);
+		draw_metric_cell(c, x0 + colw, x0 + colw * 2, "CPU", buf, m->cpu, 1);
+
+		snprintf(buf, sizeof(buf), "%d%%", m->mem);
+		draw_metric_cell(c, x0 + colw * 2, LCD_W - 6, "MEM", buf, m->mem, 1);
+	}
+
+	/* 速率曲线，标题行在曲线之上 */
 	for (i = 0; i < GRAPH_COLS; i++) {
 		double v = height_to_rate(m->graph_h[i]);
 		if (v > mx) mx = v;
@@ -602,61 +679,28 @@ static void render_dashboard(Canvas *c, const Metrics *m)
 	if (mn > 1e98) mn = 0.0;
 	format_rate(mx, maxs, sizeof(maxs));
 	format_rate(mn, mins, sizeof(mins));
-	snprintf(buf, sizeof(buf), "MAX %s/s", maxs);
-	draw_text_right(c, font10_glyphs, FONT10_COUNT, LCD_W - 4, 14, buf, C_TEXT_MID);
-	snprintf(buf, sizeof(buf), "MIN %s/s", mins);
-	draw_text_right(c, font10_glyphs, FONT10_COUNT, LCD_W - 4, 23, buf, C_TEXT_DIM);
+
+	snprintf(buf, sizeof(buf), "%s  RX+TX  MAX %s/s  MIN %s/s",
+		 m->iface, maxs, mins);
+	draw_text(c, font10_glyphs, FONT10_COUNT, LEFT_W + 6, 60, buf, C_TEXT_MID, 0);
+
+	/* 曲线基线 */
+	hline(c, LEFT_W + 6, LCD_W - 6, LCD_H - 8, C_LINE);
 
 	for (k = 0; k < GRAPH_COLS; k++) {
 		int h = m->graph_h[k];
-		int x = 206 + k * 6;
+		int x = LEFT_W + 8 + k * 7;
 
-		if (x + 4 > LCD_W - 4) break;
+		if (x + 5 > LCD_W - 4) break;
 		for (i = 0; i < h; i++) {
-			int y = 79 - i * 3;
+			int y = LCD_H - 10 - i * 4;
 			uint16_t col;
 
-			if (y - 2 < 30) break;
+			if (y - 3 < 66) break;
 			col = (i >= h - 3) ? C_GRAPH_TOP : C_GRAPH_LOW;
-			fill_rect(c, x, y - 2, 4, 3, col);
+			fill_rect(c, x, y - 3, 5, 3, col);
 		}
 	}
-
-	/* --- 右下：CPU / MEMORY / CLIENTS --- */
-	vals[0] = m->cpu;
-	vals[1] = m->mem;
-	vals[2] = m->clients;
-	{
-		const char *labels[3] = { "CPU", "MEMORY", "CLIENTS" };
-		int is_pct[3] = { 1, 1, 0 };
-		int colw = (LCD_W - 143) / 3;
-
-		for (k = 0; k < 3; k++) {
-			int x0 = 143 + k * colw, x1 = x0 + colw;
-
-			draw_text_center(c, font10_glyphs, FONT10_COUNT, x0, x1, 96,
-					 labels[k], C_TEXT_DIM);
-			if (is_pct[k])
-				snprintf(buf, sizeof(buf), "%d%%", vals[k]);
-			else
-				snprintf(buf, sizeof(buf), "%d", vals[k]);
-			draw_text_center(c, font34_glyphs, FONT34_COUNT, x0, x1, 124,
-					 buf, C_TEXT);
-			if (is_pct[k]) {
-				int w = colw - 18, bx = x0 + 9, fillw;
-
-				if (w < 10) w = 10;
-				fill_rect(c, bx, 128, w, 5, C_PANEL);
-				fillw = vals[k] * w / 100;
-				if (fillw > 0)
-					fill_rect(c, bx, 128, fillw, 5, bar_color(vals[k]));
-			}
-		}
-	}
-
-	/* 底行：WAN 地址与链路状态 */
-	snprintf(buf, sizeof(buf), "%s  %s  %s", m->ip, m->link, m->iface);
-	draw_text(c, font10_glyphs, FONT10_COUNT, 146, 140, buf, C_TEXT_MID, 0);
 }
 
 /* ---------- framebuffer ---------- */
@@ -821,6 +865,7 @@ int main(int argc, char **argv)
 	if (!fbfile || !*fbfile) fbfile = "/dev/fb0";
 	if (getenv("E87N_DISPLAY_FPS")) {
 		int f = atoi(getenv("E87N_DISPLAY_FPS"));
+
 		if (f > 0 && f <= 30) fps = f;
 	}
 
@@ -829,6 +874,7 @@ int main(int argc, char **argv)
 
 		if (fp) {
 			int pid = 0;
+
 			if (fscanf(fp, "%d", &pid) == 1 && pid > 1)
 				kill(pid, SIGTERM);
 			fclose(fp);
