@@ -10,13 +10,27 @@
 # 治理，会不断把 pwm1 改回当前档位值——这就是「pwm 写不动」的原因。
 # 脚本用 trap 保证退出（含 Ctrl-C）时恢复原状态。
 #
+# 空载 vs 满载：**空载测不出风扇的作用**。空载时 CPU 发热少，散热片靠自然
+# 对流就够，风扇吹与不吹只差 1 度左右，全落在测量误差里。要看风扇有没有用，
+# 必须一边跑满四核一边扫档位。
+#
 # 用法（设备上）：
-#   sh fan-sweep            默认扫 0 / 64 / 128 / 192 / 255，每档 20 秒
-#   sh fan-sweep 30         每档 30 秒
-#   sh fan-sweep 20 0 100 255   自定义档位
+#   sh fan-sweep                    空载，默认档位，每档 20 秒
+#   sh fan-sweep load               满载（四核跑满），默认档位，每档 40 秒
+#   sh fan-sweep load 60 0 128 255  满载，每档 60 秒，自定义档位
+#   FAN_SWEEP_ZONE=/sys/class/thermal/thermal_zone1 sh fan-sweep ...
 set -u
 
-HOLD="${1:-20}"
+MODE_ARG=""
+case "${1:-}" in
+	load) MODE_ARG=load; shift ;;
+esac
+
+if [ -n "$MODE_ARG" ]; then
+	HOLD="${1:-40}"
+else
+	HOLD="${1:-20}"
+fi
 if [ "$#" -gt 1 ]; then shift; LEVELS="$*"; else LEVELS="0 64 128 192 255"; fi
 
 # --- 找 pwmfan 的 hwmon：编号不固定，按 name 找 ---
@@ -46,10 +60,20 @@ OLD_EN="$(cat "$EN" 2>/dev/null || echo 2)"
 echo "pwmfan   : $PWM_DIR"
 echo "thermal  : $TZ  ($(cat "$TZ/type" 2>/dev/null))"
 echo "初始状态 : pwm1=$(cat "$PWM" 2>/dev/null)  pwm1_enable=$OLD_EN  mode=$OLD_MODE"
+echo "模式     : ${MODE_ARG:-空载}"
 echo "逐档测试 : $LEVELS   每档 ${HOLD} 秒"
 echo
 
+LOAD_PIDS=""
+stop_load() {
+	[ -n "$LOAD_PIDS" ] || return 0
+	# yes 会 fork 出子进程，按进程组杀不适用于 busybox，直接按名杀自己起的那些
+	for pid in $LOAD_PIDS; do kill "$pid" 2>/dev/null || true; done
+	killall yes 2>/dev/null || true
+	LOAD_PIDS=""
+}
 restore() {
+	stop_load
 	printf '\n恢复 : mode=%s pwm1_enable=%s\n' "$OLD_MODE" "$OLD_EN"
 	echo "$OLD_MODE" > "$MODE" 2>/dev/null || true
 	echo "$OLD_EN"   > "$EN"   2>/dev/null || true
@@ -58,6 +82,20 @@ trap restore INT TERM EXIT
 
 echo disabled > "$MODE" 2>/dev/null || { echo "停用热管理失败，中止（未改动任何东西）" >&2; exit 1; }
 echo 1 > "$EN" 2>/dev/null || true
+
+if [ -n "$MODE_ARG" ]; then
+	n=0
+	while [ "$n" -lt 4 ]; do
+		yes > /dev/null 2>&1 &
+		LOAD_PIDS="$LOAD_PIDS $!"
+		n=$((n + 1))
+	done
+	echo "已在后台拉起 4 个 yes（退出时自动清理）"
+	echo "先跑满速预热 30 秒，让温度到稳态……"
+	echo 255 > "$PWM" 2>/dev/null || true
+	sleep 30
+	echo
+fi
 
 printf '%-6s %-12s %s\n' PWM 温度 相对上一档
 prev=""
@@ -74,3 +112,8 @@ for p in $LEVELS; do
 	printf '%-6s %-12s %s\n' "$p" "${cur}C" "$delta"
 	prev="$cur"
 done
+
+if [ -n "$MODE_ARG" ]; then
+	echo
+	echo "提示：满载扫描里 255 档的温度是这台机器的散热上限参考值。"
+fi
